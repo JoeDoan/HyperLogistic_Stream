@@ -1,0 +1,46 @@
+# Data directories & bulk files (MUST be downloaded via scripts before execution)
+data/
+*.zip
+*.parquet
+
+# Operating System files
+.DS_Store
+.AppleDouble
+.LSOverride
+Thumbs.db
+
+# Python & Virtual Environments
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+.venv/
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Jupyter Notebooks
+.ipynb_checkpoints
+
+# Apache Spark & Hadoop artifacts
+metastore_db/
+derby.log
+checkpoint/
+spark-warehouse/
+*.dump
+
+# LaTeX auxiliary files (keep .tex and .pdf)
+*.aux
+*.bbl
+*.blg
+*.log
+*.out
+*.synctex.gz
+*.fls
+*.fdb_latexmk
+
+# Editor & IDE settings
+.vscode/
+.idea/

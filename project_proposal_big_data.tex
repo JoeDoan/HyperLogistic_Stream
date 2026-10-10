@@ -1,0 +1,66 @@
+\documentclass[10pt]{article}
+\usepackage[T1]{fontenc}
+\usepackage[margin=0.55in,top=0.4in,bottom=0.35in]{geometry}
+\usepackage{enumitem}
+\usepackage{titlesec}
+\usepackage[hidelinks]{hyperref}
+\usepackage{xcolor}
+
+\definecolor{accent}{HTML}{0F766E}
+\pagestyle{empty}
+\setlength{\parindent}{0pt}
+\setlength{\parskip}{1.5pt}
+\titleformat{\section}{\normalsize\bfseries\color{accent}}{}{0pt}{}[\vspace{-5pt}\color{accent}\rule{\linewidth}{0.4pt}]
+\titlespacing*{\section}{0pt}{3pt}{1pt}
+\setlist{nosep,leftmargin=1.2em,itemsep=0.5pt}
+\urlstyle{same}
+
+\begin{document}
+
+\begin{center}
+{\Large\bfseries Real-Time Hub-to-Hub ETA Prediction with Kafka and Spark Structured Streaming}\\[2pt]
+{\small HyperLogistics-Stream \textbullet{} COMP-SCI 5540 Principles of Big Data Management, Fall 2026, UMKC \textbullet{} Instructor: Dr.\ Md Yusuf Sarwar Uddin\\
+Tony Nguyen (tmnc62@umsystem.edu), Joe Doan (jdbc6@umsystem.edu) \textbullet{} Project type: \emph{Building and integrating big data tools}, with a Spark performance study}
+\end{center}
+\vspace{-8pt}
+
+\section*{Motivation}
+Middle-mile shipments run on fixed schedules, but a destination hub often learns how late an inbound trip is only on arrival, which limits dock-door and labor planning. Weather is a major driver: the FAA attributes 74.26\% of system-impacting delays over 15 minutes to weather \cite{faa}. We build a streaming pipeline that predicts arrival delay \emph{at departure time} from weather and lane history, and measure how fast and how well it does so.
+
+\section*{Objectives and Goals}
+\begin{itemize}
+\item \textbf{RQ1 (accuracy).} Do departure delay, streaming weather and lane history beat the ``delay unchanged'' baseline and the historical lane mean (MAE, RMSE)? Models: Spark MLlib Gradient-Boosted Trees and Random Forest, trained on 2018--2023 (2020 excluded), tested on 2024, with features known at departure only. Predicted ETA $=$ scheduled arrival $+$ departure delay $+$ predicted change.
+\item \textbf{RQ2 (system performance).} How do cores (2/4/8), shuffle partitions (8/64/200), Kafka replay rate (1k/5k/20k events/s) and \texttt{maxOffsetsPerTrigger} (5k/20k/100k) change throughput, batch time and p50/p95 end-to-end latency \cite{karimov,fedorovych}?
+\item \textbf{RQ3 (stretch).} Can an LLM agent answer dispatcher questions from the live prediction tables, kept off the streaming path?
+\end{itemize}
+
+\section*{Data Sources}
+\begin{itemize}
+\item \textbf{BTS Reporting Carrier On-Time Performance, 2018--2024}: tens of millions of flights with scheduled and actual times, delays and delay causes; raw CSV expected in the 5--10\,GB range (to be confirmed after download).\\
+\url{https://www.transtats.bts.gov/DL_SelectFields.aspx?gnoyr_VQ=FGJ&QO_fu146_anzr=b0-gvzr}
+\item \textbf{NOAA Integrated Surface Database} \cite{isd}: hourly temperature, visibility and wind; free bulk access.\\
+\url{https://www.ncei.noaa.gov/data/global-hourly/}
+\item \textbf{Fusion:} each airport is mapped to its nearest NOAA station (ICAO match), local times are converted to UTC, and Spark joins on (station, UTC hour). BTS's weather-delay field is excluded, since it is known only after arrival and covers extreme weather only.
+\end{itemize}
+\textbf{Proxy and limits.} Real middle-mile telematics are proprietary, so scheduled hub-to-hub flights are a public proxy with the same structure (fixed lane, schedule, weather, destination congestion). BTS covers passenger carriers, not cargo carriers. Trucks add Hours of Service limits, road traffic and dwell; the stream replays recorded data. Related work: flight delays \cite{sternberg,beltman}, logistics ETA \cite{wani}; we found no study validating flights as a trucking proxy.
+
+\section*{Architecture, Tools and Plan}
+\textbf{Ingestion:} Kafka producer replaying flights in WheelsOff order \cite{kreps}. \textbf{Storage:} Parquet medallion (bronze raw events, silver cleaned and weather-enriched, gold features, predictions and sliding-window hub arrival counts). \textbf{Processing:} PySpark Structured Streaming \cite{armbrust} with stream-static joins and MLlib scoring. \textbf{Serving:} FastAPI and Streamlit dashboard, packaged with Docker Compose (one-command run). Optional stateful feature: previous-leg delay for the same tail number.\\
+\textbf{Schedule (8 weeks):} W1 setup; W1--2 data and join; W2--4 features and models; W2--5 producer and streaming job; W4--6 API and dashboard; W5--7 benchmarks; W7--8 report and demo. If compute is tight, Random Forest tuning is cut first.
+
+\begingroup\footnotesize
+\begin{thebibliography}{9}
+\setlength{\itemsep}{0pt}\setlength{\parsep}{0pt}
+\bibitem{armbrust} M. Armbrust et al., ``Structured Streaming: A declarative API for real-time applications in Apache Spark,'' in \emph{Proc. ACM SIGMOD}, 2018, pp. 601--613.
+\bibitem{karimov} J. Karimov et al., ``Benchmarking distributed stream data processing systems,'' in \emph{Proc. IEEE ICDE}, 2018. arXiv:1802.08496.
+\bibitem{kreps} J. Kreps, N. Narkhede, J. Rao, ``Kafka: A distributed messaging system for log processing,'' in \emph{Proc. NetDB}, 2011.
+\bibitem{sternberg} A. Sternberg et al., ``A review on flight delay prediction,'' \emph{Transport Reviews}, 2020. arXiv:1703.06118.
+\bibitem{beltman} M. Beltman et al., ``Dynamically forecasting airline departure delay probability distributions for individual flights,'' \emph{J. Air Transport Management}, vol. 126, 2025.
+\bibitem{isd} A. Smith, N. Lott, R. Vose, ``The Integrated Surface Database,'' \emph{Bull. Amer. Meteor. Soc.}, vol. 92, pp. 704--708, 2011. doi:10.1175/2011BAMS3015.1
+\bibitem{wani} A. A. Wani, ``Ten quick tips for improving estimated time of arrival predictions using machine learning,'' \emph{PeerJ Comput. Sci.}, 11:e3259, 2025.
+\bibitem{fedorovych} I. Fedorovych, H. Osukhivska, N. Lutsyk, ``Performance benchmarking of continuous processing and micro-batch modes in Spark Structured Streaming,'' \emph{CEUR Workshop Proc.}, vol. 3896, 2024.
+\bibitem{faa} Federal Aviation Administration, ``FAQ: Weather delay,'' \url{https://www.faa.gov/nextgen/programs/weather/faq}.
+\end{thebibliography}
+\endgroup
+
+\end{document}
