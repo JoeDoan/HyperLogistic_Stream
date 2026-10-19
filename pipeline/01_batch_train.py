@@ -1,127 +1,91 @@
 #!/usr/bin/env python3
 """
 01_batch_train.py
-Phase 1 Offline Batch Pipeline: Feature Engineering + Spark MLlib Model Training.
-
-Loads BTS On-Time Performance (2018-2023, excluding 2020) and NOAA hourly weather,
-engineers features, trains GBTRegressor (primary) and RandomForestRegressor (baseline),
-evaluates on 2023 holdout, and serializes both PipelineModels to disk.
+Offline batch pipeline: load BTS flight data + NOAA weather, engineer features,
+train GBT and RF models, evaluate on 2023 holdout, save serialized PipelineModels.
 
 Usage:
-    spark-submit --master local[4] pipeline/01_batch_train.py
-    python pipeline/01_batch_train.py  (runs with local[*] automatically)
+    python pipeline/01_batch_train.py --config config/pipeline_config_colab.yaml
+    python pipeline/01_batch_train.py --config config/pipeline_config.yaml --cores 4
 """
 
-import os
-import sys
-import glob
-import json
-import time
 import argparse
+import os
+import glob
 from pathlib import Path
 
 import yaml
 from pyspark.sql import SparkSession
 from pyspark.sql import functions as F
-from pyspark.sql.types import (
-    StructType, StructField, StringType, DoubleType, IntegerType, TimestampType
-)
+from pyspark.sql.types import DoubleType, IntegerType, StringType
 from pyspark.ml import Pipeline
-from pyspark.ml.feature import VectorAssembler, StandardScaler
+from pyspark.ml.feature import VectorAssembler
 from pyspark.ml.regression import GBTRegressor, RandomForestRegressor
 from pyspark.ml.evaluation import RegressionEvaluator
 
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(PROJECT_ROOT))
 
-CONFIG_PATH = PROJECT_ROOT / "config" / "pipeline_config.yaml"
+# ---------------------------------------------------------------------------
+# Config
+# ---------------------------------------------------------------------------
 
-# IATA -> IANA timezone mapping (serialized as broadcast)
-AIRPORT_TZ = {
-    'ATL': 'America/New_York', 'ORD': 'America/Chicago', 'DFW': 'America/Chicago',
-    'DEN': 'America/Denver', 'LAX': 'America/Los_Angeles', 'JFK': 'America/New_York',
-    'EWR': 'America/New_York', 'SFO': 'America/Los_Angeles', 'MEM': 'America/Chicago',
-    'SDF': 'America/New_York', 'CVG': 'America/New_York', 'CLT': 'America/New_York',
-    'LAS': 'America/Los_Angeles', 'PHX': 'America/Phoenix', 'MIA': 'America/New_York',
-    'IAH': 'America/Chicago', 'BOS': 'America/New_York', 'SEA': 'America/Los_Angeles',
-    'MSP': 'America/Chicago', 'DTW': 'America/New_York', 'PHL': 'America/New_York',
-    'BWI': 'America/New_York', 'SLC': 'America/Denver', 'MCO': 'America/New_York',
-}
-
-# IATA -> ICAO for weather join
-IATA_TO_ICAO = {k: 'K' + k for k in AIRPORT_TZ}
-
-
-def load_config():
-    with open(CONFIG_PATH) as f:
+def load_config(path: str) -> dict:
+    with open(path, "r") as f:
         return yaml.safe_load(f)
 
 
-def build_spark(cores: int = None, shuffle_partitions: int = 200, app_name: str = "HyperLogistics-Batch") -> SparkSession:
-    core_str = f"local[{cores}]" if cores else "local[*]"
-    spark = (
+def resolve_path(cfg_paths: dict, key: str, base_dir: str) -> str:
+    p = cfg_paths[key]
+    if not os.path.isabs(p):
+        p = os.path.join(base_dir, p)
+    return p
+
+
+# ---------------------------------------------------------------------------
+# Spark session
+# ---------------------------------------------------------------------------
+
+def create_spark(cores: int, shuffle_partitions: int) -> SparkSession:
+    return (
         SparkSession.builder
-        .appName(app_name)
-        .master(core_str)
+        .appName("HyperLogistics-BatchTrain")
+        .master(f"local[{cores}]")
         .config("spark.sql.shuffle.partitions", str(shuffle_partitions))
-        .config("spark.sql.adaptive.enabled", "true")
-        .config("spark.sql.adaptive.coalescePartitions.enabled", "true")
         .config("spark.driver.memory", "4g")
-        .config("spark.executor.memory", "4g")
-        .config("spark.sql.parquet.compression.codec", "snappy")
+        .config("spark.sql.adaptive.enabled", "false")
         .getOrCreate()
     )
-    spark.sparkContext.setLogLevel("WARN")
-    return spark
 
 
-def load_bts_csv(spark: SparkSession, bts_dir: str, years: list) -> "DataFrame":
-    """Load BTS CSVs for specified years, filter cancelled/diverted."""
-    schema = StructType([
-        StructField("FlightDate", StringType(), True),
-        StructField("Reporting_Airline", StringType(), True),
-        StructField("Tail_Number", StringType(), True),
-        StructField("Origin", StringType(), True),
-        StructField("Dest", StringType(), True),
-        StructField("CRSDepTime", DoubleType(), True),
-        StructField("DepTime", DoubleType(), True),
-        StructField("DepDelay", DoubleType(), True),
-        StructField("WheelsOff", DoubleType(), True),
-        StructField("WheelsOn", DoubleType(), True),
-        StructField("CRSArrTime", DoubleType(), True),
-        StructField("ArrTime", DoubleType(), True),
-        StructField("ArrDelay", DoubleType(), True),
-        StructField("Cancelled", DoubleType(), True),
-        StructField("Diverted", DoubleType(), True),
-        StructField("Distance", DoubleType(), True),
-    ])
+# ---------------------------------------------------------------------------
+# BTS loader — reads by column name, no fixed positional schema
+# ---------------------------------------------------------------------------
 
-    known_airports = list(AIRPORT_TZ.keys())
-    all_paths = []
+def load_bts(spark: SparkSession, raw_bts_dir: str, years: list, airports: dict):
+    known = set(airports.keys())
+    all_csvs = []
     for year in years:
-        pattern = os.path.join(bts_dir, f"*{year}*.csv")
-        all_paths.extend(glob.glob(pattern))
+        for pattern in [
+            os.path.join(raw_bts_dir, f"*{year}*.csv"),
+            os.path.join(raw_bts_dir, str(year), "*.csv"),
+        ]:
+            all_csvs.extend(glob.glob(pattern))
 
-    if not all_paths:
+    if not all_csvs:
         raise FileNotFoundError(
-            f"No BTS CSVs found for years {years} in {bts_dir}. "
-            "Run: python scripts/download_bts.py --years 2018 2019 2021 2022 2023 --extract"
+            f"No BTS CSVs found for years {years} under {raw_bts_dir}\n"
+            "Download: python scripts/download_bts.py --years 2018 2019 2021 2022 2023 --extract"
         )
 
-    print(f"[BTS] Found {len(all_paths)} CSV files for years {years}")
+    print(f"  Loading {len(all_csvs)} BTS CSV files for years {years}...")
 
-    needed = ["FlightDate", "Reporting_Airline", "Tail_Number", "Origin", "Dest",
-              "CRSDepTime", "DepTime", "DepDelay", "WheelsOff", "WheelsOn",
-              "CRSArrTime", "ArrTime", "ArrDelay", "Cancelled", "Diverted", "Distance"]
-
+    # Read all columns as strings first so column selection works regardless of order
     raw = (
         spark.read
         .option("header", "true")
-        .option("inferSchema", "false")   # all strings first
-        .csv(all_paths)
+        .option("inferSchema", "false")
+        .csv(all_csvs)
     )
 
-    # Select only what we need, cast to proper types
     df = raw.select(
         F.col("FlightDate").cast(StringType()),
         F.col("Reporting_Airline").cast(StringType()),
@@ -141,375 +105,280 @@ def load_bts_csv(spark: SparkSession, bts_dir: str, years: list) -> "DataFrame":
         F.col("Distance").cast(DoubleType()),
     )
 
-    df = (
+    return (
         df
         .filter((F.col("Cancelled") == 0) & (F.col("Diverted") == 0))
         .filter(F.col("DepDelay").isNotNull() & F.col("ArrDelay").isNotNull())
-        .filter(F.col("Origin").isin(known_airports) & F.col("Dest").isin(known_airports))
-        .withColumn("Year", F.year(F.to_date("FlightDate", "yyyy-MM-dd")))
-        .withColumn("DayOfWeek", F.dayofweek(F.to_date("FlightDate", "yyyy-MM-dd")).cast(IntegerType()))
+        .filter(F.col("Origin").isin(known) & F.col("Dest").isin(known))
         .withColumn("delta_delay", F.col("ArrDelay") - F.col("DepDelay"))
+        .withColumn("Year", F.year(F.to_date("FlightDate", "yyyy-MM-dd")))
+        .withColumn("DayOfWeek",
+                    F.dayofweek(F.to_date("FlightDate", "yyyy-MM-dd")).cast(IntegerType()))
     )
-    return df
 
 
-def add_utc_timestamps(spark: SparkSession, df: "DataFrame") -> "DataFrame":
-    """Convert HHMM local times to UTC using per-airport timezone."""
-    tz_map_json = json.dumps(AIRPORT_TZ)
+# ---------------------------------------------------------------------------
+# UTC timestamps — pure Spark built-ins, no Python UDFs
+# ---------------------------------------------------------------------------
 
-    @F.udf(returnType=TimestampType())
-    def hhmm_to_utc(flight_date_str, hhmm_float, airport_code, tz_json):
-        if hhmm_float is None or airport_code is None:
-            return None
-        import json
-        from datetime import datetime, timedelta
-        import zoneinfo
-        tz_map = json.loads(tz_json)
-        tz_name = tz_map.get(airport_code)
-        if not tz_name:
-            return None
-        try:
-            hhmm = int(hhmm_float)
-            if hhmm == 2400:
-                hour, minute, extra_day = 0, 0, 1
-            else:
-                hour, minute, extra_day = hhmm // 100, hhmm % 100, 0
-            if hour > 23 or minute > 59:
-                return None
-            fdate = datetime.strptime(flight_date_str, '%Y-%m-%d')
-            local_dt = fdate.replace(hour=hour, minute=minute) + timedelta(days=extra_day)
-            tz = zoneinfo.ZoneInfo(tz_name)
-            local_aware = local_dt.replace(tzinfo=tz)
-            utc_dt = local_aware.astimezone(zoneinfo.ZoneInfo('UTC'))
-            return utc_dt.replace(tzinfo=None)
-        except Exception:
-            return None
+def _hhmm_to_local_ts(date_col: str, hhmm_col: str):
+    """Convert FlightDate + HHMM float (1430.0 → 14:30) to local timestamp."""
+    hour_str = F.lpad(F.floor(F.col(hhmm_col) / 100).cast("string"), 2, "0")
+    min_str  = F.lpad((F.col(hhmm_col) % 100).cast(IntegerType()).cast("string"), 2, "0")
+    dt_str   = F.concat_ws(" ", F.col(date_col), F.concat(hour_str, F.lit(":"), min_str))
+    return F.to_timestamp(dt_str, "yyyy-MM-dd HH:mm")
+
+
+def add_utc_timestamps(df, airports: dict):
+    spark = df.sparkSession
+    tz_df = spark.createDataFrame(
+        [(iata, tz) for iata, tz in airports.items()],
+        ["airport", "timezone"]
+    )
 
     df = (
         df
-        .withColumn(
-            "wheels_off_utc",
-            hhmm_to_utc(F.col("FlightDate"), F.col("WheelsOff"), F.col("Origin"), F.lit(tz_map_json))
-        )
-        .withColumn(
-            "sched_arr_utc",
-            hhmm_to_utc(F.col("FlightDate"), F.col("CRSArrTime"), F.col("Dest"), F.lit(tz_map_json))
-        )
-        .filter(F.col("wheels_off_utc").isNotNull() & F.col("sched_arr_utc").isNotNull())
-        .withColumn("DepHourUTC", F.hour("wheels_off_utc"))
-        .withColumn("ArrHourUTC", F.hour("sched_arr_utc"))
-        .withColumn(
-            "sched_arr_hour_utc",
-            F.date_trunc("hour", F.col("sched_arr_utc"))
-        )
+        .join(tz_df.withColumnRenamed("airport", "Origin").withColumnRenamed("timezone", "_dep_tz"),
+              on="Origin", how="left")
+        .join(tz_df.withColumnRenamed("airport", "Dest").withColumnRenamed("timezone", "_arr_tz"),
+              on="Dest", how="left")
+        .withColumn("_dep_local", _hhmm_to_local_ts("FlightDate", "CRSDepTime"))
+        .withColumn("_arr_local", _hhmm_to_local_ts("FlightDate", "CRSArrTime"))
+        .withColumn("DepUTC", F.to_utc_timestamp("_dep_local", F.col("_dep_tz")))
+        .withColumn("ArrUTC", F.to_utc_timestamp("_arr_local", F.col("_arr_tz")))
+        .withColumn("DepHourUTC", F.hour("DepUTC").cast(DoubleType()))
+        .withColumn("ArrHourUTC", F.hour("ArrUTC").cast(DoubleType()))
+        .withColumn("ArrDateHourUTC", F.date_trunc("hour", "ArrUTC"))
+        .drop("_dep_local", "_arr_local", "_dep_tz", "_arr_tz")
     )
     return df
 
 
-def load_noaa_weather(spark: SparkSession, noaa_dir: str, years: list) -> "DataFrame":
-    """Load and clean NOAA ISD hourly weather CSVs for given years."""
-    all_paths = []
+# ---------------------------------------------------------------------------
+# Lane mean delay
+# ---------------------------------------------------------------------------
+
+def add_lane_mean_delay(df):
+    lane_stats = (
+        df.groupBy("Origin", "Dest")
+        .agg(F.mean("ArrDelay").alias("LaneMeanDelay"))
+    )
+    return df.join(lane_stats, on=["Origin", "Dest"], how="left")
+
+
+# ---------------------------------------------------------------------------
+# NOAA loader — parses WND/VIS/TMP with Spark string ops, no Python UDFs
+# ---------------------------------------------------------------------------
+
+def load_noaa(spark: SparkSession, raw_noaa_dir: str, years: list):
+    all_csvs = []
     for year in years:
-        pattern = os.path.join(noaa_dir, str(year), "*.csv")
-        all_paths.extend(glob.glob(pattern))
+        for pattern in [
+            os.path.join(raw_noaa_dir, str(year), "*.csv"),
+            os.path.join(raw_noaa_dir, f"*{year}*.csv"),
+        ]:
+            all_csvs.extend(glob.glob(pattern))
 
-    if not all_paths:
-        raise FileNotFoundError(
-            f"No NOAA CSVs found in {noaa_dir} for years {years}. "
-            "Run: python scripts/download_noaa.py --years 2018 2019 2021 2022 2023"
-        )
-
-    print(f"[NOAA] Found {len(all_paths)} station-year files")
-
-    @F.udf(returnType=DoubleType())
-    def parse_wind_speed(wnd_str):
-        if not wnd_str or wnd_str == 'nan':
-            return None
-        parts = str(wnd_str).split(',')
-        if len(parts) >= 4:
-            try:
-                v = int(parts[3])
-                return None if v == 9999 else v / 10.0
-            except ValueError:
-                pass
+    all_csvs = list(set(all_csvs))
+    if not all_csvs:
+        print(f"  WARNING: No NOAA CSVs found under {raw_noaa_dir}. Weather features → defaults.")
         return None
 
-    @F.udf(returnType=DoubleType())
-    def parse_visibility(vis_str):
-        if not vis_str or vis_str == 'nan':
-            return None
-        parts = str(vis_str).split(',')
-        if parts:
-            try:
-                v = int(parts[0])
-                return None if v == 999999 else float(v)
-            except ValueError:
-                pass
-        return None
+    print(f"  Loading {len(all_csvs)} NOAA weather files...")
 
-    @F.udf(returnType=DoubleType())
-    def parse_temp(tmp_str):
-        if not tmp_str or tmp_str == 'nan':
-            return None
-        parts = str(tmp_str).split(',')
-        if parts:
-            try:
-                v = int(parts[0])
-                return None if v == 9999 else v / 10.0
-            except ValueError:
-                pass
-        return None
-
-    # Extract ICAO from filename via path manipulation
-    weather_df = (
+    raw = (
         spark.read
         .option("header", "true")
         .option("inferSchema", "false")
-        .csv(all_paths)
-        .select(
-            F.input_file_name().alias("_filepath"),
-            F.col("DATE").alias("raw_date"),
-            F.col("WND"),
-            F.col("VIS"),
-            F.col("TMP"),
-        )
-        .withColumn("icao", F.regexp_extract(F.col("_filepath"), r"([A-Z0-9]{4})_\d+\.csv$", 1))
-        .filter(F.col("icao") != "")
-        .withColumn("observed_utc", F.to_timestamp("raw_date"))
-        .filter(F.col("observed_utc").isNotNull())
-        .withColumn("utc_hour", F.date_trunc("hour", "observed_utc"))
-        .withColumn("wind_speed_mps", parse_wind_speed(F.col("WND")))
-        .withColumn("visibility_m", parse_visibility(F.col("VIS")))
-        .withColumn("temp_c", parse_temp(F.col("TMP")))
-        .drop("_filepath", "WND", "VIS", "TMP", "raw_date")
-        # Deduplicate: one reading per (icao, hour)
-        .dropDuplicates(["icao", "utc_hour"])
+        .csv(all_csvs)
     )
-    return weather_df
+
+    # NOAA ISD compound field format:
+    #   WND: "ddd,q,T,ffff,q"  — speed element [3] in 10ths m/s; 9999 = missing
+    #   VIS: "dddddd,q,V,q"    — visibility meters element [0]; 999999 = missing
+    #   TMP: "+dddd,q"         — temp 10ths Celsius element [0]; +9999 = missing
+    # Files named KATL_722190014732.csv — derive ICAO from filename via input_file_name()
+
+    return (
+        raw
+        .filter(F.col("DATE").isNotNull())
+        .withColumn("DestICAO",
+                    F.regexp_extract(F.input_file_name(), r'/(K[A-Z]{3})_', 1))
+        .withColumn("_wnd",  F.split(F.col("WND"), ",").getItem(3).cast(DoubleType()))
+        .withColumn("_vis",  F.split(F.col("VIS"), ",").getItem(0).cast(DoubleType()))
+        .withColumn("_tmp",  F.regexp_extract(F.col("TMP"), r'^([+\-]?\d+)', 1).cast(DoubleType()))
+        .withColumn("DestWindSpeed",
+                    F.when(F.col("_wnd") >= 9999, F.lit(None)).otherwise(F.col("_wnd") / 10.0))
+        .withColumn("DestVisibility",
+                    F.when(F.col("_vis") >= 999999, F.lit(None)).otherwise(F.col("_vis")))
+        .withColumn("DestTemp",
+                    F.when(F.col("_tmp") >= 9999, F.lit(None)).otherwise(F.col("_tmp") / 10.0))
+        .withColumn("WeatherHourUTC",
+                    F.date_trunc("hour", F.to_timestamp("DATE", "yyyy-MM-dd'T'HH:mm:ss")))
+        .filter(F.col("DestICAO") != "")
+        .select("DestICAO", "WeatherHourUTC", "DestWindSpeed", "DestVisibility", "DestTemp")
+        .dropDuplicates(["DestICAO", "WeatherHourUTC"])
+    )
 
 
-def add_lane_history(df: "DataFrame") -> "DataFrame":
-    """Compute 30-day rolling lane mean delay using a lookback window.
-    Approximation: use full-dataset historical mean per Origin-Dest lane as proxy
-    (Spark windowed rolling average would require sorted partition; use aggregate mean here).
-    """
-    lane_mean = (
+def join_weather(df, noaa_df, airports: dict):
+    if noaa_df is None:
+        return (df
+                .withColumn("DestWindSpeed",  F.lit(3.0))
+                .withColumn("DestVisibility", F.lit(10000.0))
+                .withColumn("DestTemp",       F.lit(15.0)))
+
+    # US airports: ICAO = 'K' + IATA  (ORD → KORD)
+    df = df.withColumn("_DestICAO", F.concat(F.lit("K"), F.col("Dest")))
+
+    df = df.join(
+        F.broadcast(noaa_df.withColumnRenamed("WeatherHourUTC", "_wHour")),
+        on=(F.col("_DestICAO") == F.col("DestICAO")) &
+           (F.col("ArrDateHourUTC") == F.col("_wHour")),
+        how="left",
+    ).drop("_wHour", "DestICAO", "_DestICAO")
+
+    return (
         df
-        .groupBy("Origin", "Dest")
-        .agg(F.avg("delta_delay").alias("LaneMeanDelay"))
-    )
-    df = df.join(F.broadcast(lane_mean), on=["Origin", "Dest"], how="left")
-    df = df.fillna(0.0, subset=["LaneMeanDelay"])
-    return df
-
-
-def join_weather(flights_df: "DataFrame", weather_df: "DataFrame") -> "DataFrame":
-    """Broadcast join flights with static NOAA weather on (dest_icao, sched_arr_hour_utc)."""
-    iata_to_icao_map = IATA_TO_ICAO
-
-    @F.udf(returnType=StringType())
-    def to_icao(iata):
-        return iata_to_icao_map.get(iata, 'K' + iata if iata else None)
-
-    flights_df = flights_df.withColumn("dest_icao", to_icao(F.col("Dest")))
-
-    weather_renamed = weather_df.select(
-        F.col("icao").alias("w_icao"),
-        F.col("utc_hour").alias("w_utc_hour"),
-        F.col("wind_speed_mps").alias("DestWindSpeed"),
-        F.col("visibility_m").alias("DestVisibility"),
-        F.col("temp_c").alias("DestTemp"),
+        .withColumn("DestWindSpeed",  F.coalesce("DestWindSpeed",  F.lit(3.0)))
+        .withColumn("DestVisibility", F.coalesce("DestVisibility", F.lit(10000.0)))
+        .withColumn("DestTemp",       F.coalesce("DestTemp",       F.lit(15.0)))
     )
 
-    joined = flights_df.join(
-        F.broadcast(weather_renamed),
-        (flights_df.dest_icao == weather_renamed.w_icao) &
-        (flights_df.sched_arr_hour_utc == weather_renamed.w_utc_hour),
-        how="inner"
-    ).drop("w_icao", "w_utc_hour")
 
-    # Fill missing weather features with medians (constants for robustness)
-    joined = joined.fillna({
-        "DestWindSpeed": 3.5,
-        "DestVisibility": 9000.0,
-        "DestTemp": 15.0,
-    })
-    return joined
+# ---------------------------------------------------------------------------
+# Training
+# ---------------------------------------------------------------------------
+
+FEATURE_COLS = [
+    "DepDelay", "Distance", "DepHourUTC", "ArrHourUTC",
+    "DayOfWeek", "DestWindSpeed", "DestVisibility", "DestTemp", "LaneMeanDelay",
+]
+LABEL_COL = "delta_delay"
 
 
-def build_feature_vector(df: "DataFrame") -> "DataFrame":
-    feature_cols = [
-        "DepDelay", "Distance", "DepHourUTC", "ArrHourUTC", "DayOfWeek",
-        "DestWindSpeed", "DestVisibility", "DestTemp", "LaneMeanDelay"
-    ]
-    assembler = VectorAssembler(inputCols=feature_cols, outputCol="features", handleInvalid="skip")
-    return assembler.transform(df)
+def train_and_evaluate(train_df, val_df, train_cfg: dict, skip_rf: bool):
+    seed = train_cfg["seed"]
+    assembler = VectorAssembler(inputCols=FEATURE_COLS, outputCol="features", handleInvalid="skip")
+
+    gbt = GBTRegressor(
+        featuresCol="features", labelCol=LABEL_COL,
+        maxIter=train_cfg["gbt_max_iter"], maxDepth=train_cfg["gbt_max_depth"], seed=seed,
+    )
+    print("  Training GBT...")
+    gbt_model = Pipeline(stages=[assembler, gbt]).fit(train_df)
+    _print_metrics(gbt_model, val_df, "GBT")
+
+    rf_model = None
+    if not skip_rf:
+        rf = RandomForestRegressor(
+            featuresCol="features", labelCol=LABEL_COL,
+            numTrees=train_cfg["rf_num_trees"], seed=seed,
+        )
+        print("  Training RandomForest...")
+        rf_model = Pipeline(stages=[assembler, rf]).fit(train_df)
+        _print_metrics(rf_model, val_df, "RandomForest")
+
+    return gbt_model, rf_model
 
 
-def evaluate_model(model, test_df, label_col="delta_delay", model_name="Model"):
-    predictions = model.transform(test_df)
-    evaluator_mae = RegressionEvaluator(labelCol=label_col, predictionCol="prediction", metricName="mae")
-    evaluator_rmse = RegressionEvaluator(labelCol=label_col, predictionCol="prediction", metricName="rmse")
-    mae = evaluator_mae.evaluate(predictions)
-    rmse = evaluator_rmse.evaluate(predictions)
-    print(f"  [{model_name}] MAE={mae:.3f} min  RMSE={rmse:.3f} min")
-    return mae, rmse
+def _print_metrics(model, val_df, name: str):
+    preds = model.transform(val_df)
+    mae  = RegressionEvaluator(labelCol=LABEL_COL, metricName="mae").evaluate(preds)
+    rmse = RegressionEvaluator(labelCol=LABEL_COL, metricName="rmse").evaluate(preds)
+
+    b1_mae = RegressionEvaluator(labelCol=LABEL_COL, metricName="mae").evaluate(
+        preds.withColumn("prediction", F.lit(0.0)))
+    b2_mae = RegressionEvaluator(labelCol=LABEL_COL, metricName="mae").evaluate(
+        preds.withColumn("prediction", F.col("LaneMeanDelay") - F.col("DepDelay")))
+
+    print(f"\n  --- {name} (2023 holdout) ---")
+    print(f"  {name:<20} MAE={mae:.3f}  RMSE={rmse:.3f}")
+    print(f"  Baseline no-change     MAE={b1_mae:.3f}")
+    print(f"  Baseline lane-mean     MAE={b2_mae:.3f}")
 
 
-def compute_baselines(test_df):
-    """Compute Baseline 1 (delta=0) and Baseline 2 (lane mean) MAE/RMSE."""
-    # Baseline 1: No-change (predict delta_delay = 0 for every flight)
-    evaluator_mae = RegressionEvaluator(labelCol="delta_delay", predictionCol="b1_pred", metricName="mae")
-    evaluator_rmse = RegressionEvaluator(labelCol="delta_delay", predictionCol="b1_pred", metricName="rmse")
-    b1_df = test_df.withColumn("b1_pred", F.lit(0.0))
-    b1_mae = evaluator_mae.evaluate(b1_df)
-    b1_rmse = evaluator_rmse.evaluate(b1_df)
-    print(f"  [Baseline-1 No-Change]  MAE={b1_mae:.3f} min  RMSE={b1_rmse:.3f} min")
-
-    # Baseline 2: Lane historical mean
-    b2_df = test_df.withColumn("b2_pred", F.col("LaneMeanDelay"))
-    evaluator_mae2 = RegressionEvaluator(labelCol="delta_delay", predictionCol="b2_pred", metricName="mae")
-    evaluator_rmse2 = RegressionEvaluator(labelCol="delta_delay", predictionCol="b2_pred", metricName="rmse")
-    b2_mae = evaluator_mae2.evaluate(b2_df)
-    b2_rmse = evaluator_rmse2.evaluate(b2_df)
-    print(f"  [Baseline-2 Lane Mean]  MAE={b2_mae:.3f} min  RMSE={b2_rmse:.3f} min")
-    return {"b1_mae": b1_mae, "b1_rmse": b1_rmse, "b2_mae": b2_mae, "b2_rmse": b2_rmse}
-
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
 
 def main():
-    parser = argparse.ArgumentParser(description="HyperLogistics Batch Training Pipeline")
-    parser.add_argument("--cores", type=int, default=None, help="Spark local cores (default: all)")
-    parser.add_argument("--shuffle-partitions", type=int, default=64, help="spark.sql.shuffle.partitions")
-    parser.add_argument("--skip-rf", action="store_true", help="Skip Random Forest training to save time")
+    parser = argparse.ArgumentParser(description="HyperLogistics-Stream: Offline Batch Training")
+    parser.add_argument("--config", default="config/pipeline_config.yaml",
+                        help="Path to YAML config (default: config/pipeline_config.yaml)")
+    parser.add_argument("--cores", type=int, default=4,
+                        help="Spark local cores (default: 4)")
+    parser.add_argument("--shuffle-partitions", type=int, default=64,
+                        help="spark.sql.shuffle.partitions (default: 64)")
+    parser.add_argument("--skip-rf", action="store_true",
+                        help="Skip RandomForest to save time")
     args = parser.parse_args()
 
-    cfg = load_config()
-    bts_dir = str(PROJECT_ROOT / cfg["paths"]["raw_bts"])
-    noaa_dir = str(PROJECT_ROOT / cfg["paths"]["raw_noaa"])
-    models_dir = PROJECT_ROOT / cfg["paths"]["models"]
-    models_dir.mkdir(parents=True, exist_ok=True)
+    script_dir = Path(__file__).parent.parent
+    cfg_path   = args.config if os.path.isabs(args.config) else str(script_dir / args.config)
 
-    train_years = cfg["training"]["train_years"]
-    val_year = cfg["training"]["val_year"]
-    all_years = train_years + [val_year]
+    print(f"Config: {cfg_path}")
+    cfg = load_config(cfg_path)
 
-    print("=" * 60)
-    print("HyperLogistics-Stream: Phase 1 Batch Training")
-    print(f"Train years: {train_years}  |  Val year: {val_year}")
-    print("=" * 60)
+    base_dir   = str(script_dir)
+    paths      = cfg["paths"]
+    train_cfg  = cfg["training"]
+    airports   = cfg["airports"]
 
-    spark = build_spark(cores=args.cores, shuffle_partitions=args.shuffle_partitions)
+    raw_bts    = resolve_path(paths, "raw_bts",  base_dir)
+    raw_noaa   = resolve_path(paths, "raw_noaa", base_dir)
+    models_dir = resolve_path(paths, "models",   base_dir)
+    Path(models_dir).mkdir(parents=True, exist_ok=True)
 
-    # --- Load & Clean BTS ---
-    t0 = time.time()
-    bts_raw = load_bts_csv(spark, bts_dir, all_years)
-    bts_utc = add_utc_timestamps(spark, bts_raw)
+    train_yrs = train_cfg["train_years"]
+    val_yr    = train_cfg["val_year"]
+    all_years = sorted(set(train_yrs + [val_yr]))
 
-    # --- Load & Clean NOAA ---
-    noaa_df = load_noaa_weather(spark, noaa_dir, all_years)
+    print(f"\n=== HyperLogistics-Stream: Batch Training ===")
+    print(f"  Train years : {train_yrs}  |  Val year: {val_yr}")
+    print(f"  Cores: {args.cores}  |  Shuffle partitions: {args.shuffle_partitions}")
 
-    # --- Join BTS with NOAA ---
-    print("[JOIN] Joining flights with destination weather...")
-    joined = join_weather(bts_utc, noaa_df)
+    spark = create_spark(args.cores, args.shuffle_partitions)
+    spark.sparkContext.setLogLevel("WARN")
 
-    # --- Lane Mean Delay Feature ---
-    train_data = joined.filter(F.col("Year").isin(train_years))
-    val_data = joined.filter(F.col("Year") == val_year)
+    print("\n[1/5] Loading BTS data...")
+    flights = load_bts(spark, raw_bts, all_years, airports)
 
-    # Compute lane mean on train only, broadcast to val
-    lane_mean = (
-        train_data
-        .groupBy("Origin", "Dest")
-        .agg(F.avg("delta_delay").alias("LaneMeanDelay"))
+    print("[2/5] Adding UTC timestamps...")
+    flights = add_utc_timestamps(flights, airports)
+
+    print("[3/5] Computing lane mean delay...")
+    flights = add_lane_mean_delay(flights)
+
+    print("[4/5] Loading and joining NOAA weather...")
+    noaa    = load_noaa(spark, raw_noaa, all_years)
+    flights = join_weather(flights, noaa, airports)
+
+    keep_cols = FEATURE_COLS + [LABEL_COL, "Year", "Origin", "Dest",
+                                "FlightDate", "Reporting_Airline"]
+    flights_clean = (
+        flights.select(keep_cols)
+        .dropna(subset=FEATURE_COLS + [LABEL_COL])
+        .cache()
     )
-    train_data = train_data.join(F.broadcast(lane_mean), on=["Origin", "Dest"], how="left").fillna(0.0, subset=["LaneMeanDelay"])
-    val_data = val_data.join(F.broadcast(lane_mean), on=["Origin", "Dest"], how="left").fillna(0.0, subset=["LaneMeanDelay"])
 
-    # Persist lane mean for the streaming pipeline
-    lane_mean_path = str(models_dir / "lane_mean.parquet")
-    lane_mean.write.mode("overwrite").parquet(lane_mean_path)
-    print(f"[SAVE] Lane mean table → {lane_mean_path}")
+    train_df = flights_clean.filter(F.col("Year").isin(train_yrs))
+    val_df   = flights_clean.filter(F.col("Year") == val_yr)
+    print(f"  Train rows: {train_df.count():,}  |  Val rows: {val_df.count():,}")
 
-    # --- Build Feature Vector ---
-    feature_cols = [
-        "DepDelay", "Distance", "DepHourUTC", "ArrHourUTC", "DayOfWeek",
-        "DestWindSpeed", "DestVisibility", "DestTemp", "LaneMeanDelay"
-    ]
-    assembler = VectorAssembler(inputCols=feature_cols, outputCol="features", handleInvalid="skip")
+    print("[5/5] Training models...")
+    gbt_model, rf_model = train_and_evaluate(train_df, val_df, train_cfg, args.skip_rf)
 
-    train_vec = assembler.transform(train_data).select("features", "delta_delay").cache()
-    val_vec = assembler.transform(val_data).select("features", "delta_delay", "LaneMeanDelay").cache()
+    gbt_path = os.path.join(models_dir, "gbt_pipeline_v1")
+    gbt_model.write().overwrite().save(gbt_path)
+    print(f"\n  GBT saved → {gbt_path}")
 
-    train_count = train_vec.count()
-    val_count = val_vec.count()
-    print(f"[DATA] Train: {train_count:,}  Val: {val_count:,}  (elapsed {time.time()-t0:.1f}s)")
+    if rf_model:
+        rf_path = os.path.join(models_dir, "rf_pipeline_v1")
+        rf_model.write().overwrite().save(rf_path)
+        print(f"  RF  saved → {rf_path}")
 
-    # --- Train GBT (Primary Model) ---
-    print("\n[TRAIN] Training GBTRegressor...")
-    gbt = GBTRegressor(
-        featuresCol="features",
-        labelCol="delta_delay",
-        maxIter=cfg["training"]["gbt_max_iter"],
-        maxDepth=cfg["training"]["gbt_max_depth"],
-        seed=cfg["training"]["seed"],
-    )
-    t_gbt = time.time()
-    gbt_model = gbt.fit(train_vec)
-    print(f"  GBT training time: {time.time()-t_gbt:.1f}s")
-
-    # --- Evaluate ---
-    print("\n[EVAL] Holdout evaluation on 2023:")
-    compute_baselines(val_vec)
-    gbt_mae, gbt_rmse = evaluate_model(gbt_model, val_vec, model_name="GBT")
-
-    # Save assembled pipeline (assembler + model) for streaming use
-    from pyspark.ml import Pipeline as SparkPipeline
-    gbt_pipeline = SparkPipeline(stages=[assembler, gbt])
-    gbt_pipeline_model = gbt_pipeline.fit(train_data.select(feature_cols + ["delta_delay"]))
-    gbt_model_path = str(models_dir / "gbt_pipeline_v1")
-    gbt_pipeline_model.write().overwrite().save(gbt_model_path)
-    print(f"[SAVE] GBT PipelineModel → {gbt_model_path}")
-
-    # --- Train RF (Baseline Model) ---
-    if not args.skip_rf:
-        print("\n[TRAIN] Training RandomForestRegressor...")
-        rf = RandomForestRegressor(
-            featuresCol="features",
-            labelCol="delta_delay",
-            numTrees=cfg["training"]["rf_num_trees"],
-            seed=cfg["training"]["seed"],
-        )
-        t_rf = time.time()
-        rf_model = rf.fit(train_vec)
-        print(f"  RF training time: {time.time()-t_rf:.1f}s")
-        rf_mae, rf_rmse = evaluate_model(rf_model, val_vec, model_name="RandomForest")
-
-        rf_pipeline = SparkPipeline(stages=[assembler, rf])
-        rf_pipeline_model = rf_pipeline.fit(train_data.select(feature_cols + ["delta_delay"]))
-        rf_model_path = str(models_dir / "rf_pipeline_v1")
-        rf_pipeline_model.write().overwrite().save(rf_model_path)
-        print(f"[SAVE] RF PipelineModel → {rf_model_path}")
-
-    # --- Save Training Metrics ---
-    metrics = {
-        "train_count": train_count,
-        "val_count": val_count,
-        "gbt_mae": gbt_mae,
-        "gbt_rmse": gbt_rmse,
-        "train_years": train_years,
-        "val_year": val_year,
-        "total_elapsed_sec": time.time() - t0,
-    }
-    metrics_path = models_dir / "training_metrics.json"
-    import json
-    with open(metrics_path, "w") as f:
-        json.dump(metrics, f, indent=2)
-    print(f"\n[SAVE] Metrics → {metrics_path}")
-
-    print("\n" + "=" * 60)
-    print("Phase 1 Complete. Models ready for streaming pipeline.")
-    print("=" * 60)
-
+    print("\n=== Batch Training Complete ===")
     spark.stop()
 
 
