@@ -1,0 +1,85 @@
+kafka:
+  bootstrap_servers: "localhost:9092"
+  topic: "flights_stream"
+  partitions: 8
+  consumer_group: "hyperlogistics-spark-consumer"
+
+paths:
+  raw_bts: "/content/drive/MyDrive/HyperLogistics/data/raw/bts"
+  raw_noaa: "/content/drive/MyDrive/HyperLogistics/data/raw/noaa"
+  bronze: "/content/drive/MyDrive/HyperLogistics/data/bronze/flights_raw"
+  silver: "/content/drive/MyDrive/HyperLogistics/data/silver/flights_enriched"
+  gold_predictions: "/content/drive/MyDrive/HyperLogistics/data/gold/predictions"
+  gold_congestion: "/content/drive/MyDrive/HyperLogistics/data/gold/hub_congestion"
+  models: "/content/drive/MyDrive/HyperLogistics/models"
+  checkpoints: "/content/checkpoints"
+  benchmark_results: "/content/drive/MyDrive/HyperLogistics/benchmark/results"
+
+training:
+  train_years: [2018, 2019, 2021, 2022]
+  val_year: 2023
+  stream_year: 2024
+  gbt_max_iter: 50
+  gbt_max_depth: 5
+  rf_num_trees: 100
+  seed: 42
+
+features:
+  numeric:
+    - DepDelay
+    - Distance
+    - DepHourUTC
+    - ArrHourUTC
+    - DayOfWeek
+    - DestWindSpeed
+    - DestVisibility
+    - DestTemp
+    - LaneMeanDelay
+  label: "delta_delay"
+
+airports:
+  ATL: "America/New_York"
+  ORD: "America/Chicago"
+  DFW: "America/Chicago"
+  DEN: "America/Denver"
+  LAX: "America/Los_Angeles"
+  JFK: "America/New_York"
+  EWR: "America/New_York"
+  SFO: "America/Los_Angeles"
+  MEM: "America/Chicago"
+  SDF: "America/New_York"
+  CVG: "America/New_York"
+  CLT: "America/New_York"
+  LAS: "America/Los_Angeles"
+  PHX: "America/Phoenix"
+  MIA: "America/New_York"
+  IAH: "America/Chicago"
+  BOS: "America/New_York"
+  SEA: "America/Los_Angeles"
+  MSP: "America/Chicago"
+  DTW: "America/New_York"
+  PHL: "America/New_York"
+  BWI: "America/New_York"
+  SLC: "America/Denver"
+  MCO: "America/New_York"
+
+producer:
+  default_rate_eps: 1000
+  burst_rates: [1000, 5000, 20000]
+
+streaming:
+  trigger_interval_sec: 5
+  max_offsets_per_trigger: 5000
+  window_duration: "1 hour"
+  slide_duration: "15 minutes"
+  watermark_delay: "10 minutes"
+  high_risk_threshold_min: 30.0
+
+benchmark:
+  cores: [2, 4, 8]
+  shuffle_partitions: [8, 64, 200]
+  ingestion_rates: [1000, 5000, 20000]
+  max_offsets: [5000, 20000, 100000]
+  runs_per_config: 1
+  warmup_batches: 3
+  measure_batches: 10
