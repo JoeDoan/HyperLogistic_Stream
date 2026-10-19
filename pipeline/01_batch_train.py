@@ -110,11 +110,39 @@ def load_bts_csv(spark: SparkSession, bts_dir: str, years: list) -> "DataFrame":
 
     print(f"[BTS] Found {len(all_paths)} CSV files for years {years}")
 
-    df = (
+    needed = ["FlightDate", "Reporting_Airline", "Tail_Number", "Origin", "Dest",
+              "CRSDepTime", "DepTime", "DepDelay", "WheelsOff", "WheelsOn",
+              "CRSArrTime", "ArrTime", "ArrDelay", "Cancelled", "Diverted", "Distance"]
+
+    raw = (
         spark.read
         .option("header", "true")
-        .schema(schema)
+        .option("inferSchema", "false")   # all strings first
         .csv(all_paths)
+    )
+
+    # Select only what we need, cast to proper types
+    df = raw.select(
+        F.col("FlightDate").cast(StringType()),
+        F.col("Reporting_Airline").cast(StringType()),
+        F.col("Tail_Number").cast(StringType()),
+        F.col("Origin").cast(StringType()),
+        F.col("Dest").cast(StringType()),
+        F.col("CRSDepTime").cast(DoubleType()),
+        F.col("DepTime").cast(DoubleType()),
+        F.col("DepDelay").cast(DoubleType()),
+        F.col("WheelsOff").cast(DoubleType()),
+        F.col("WheelsOn").cast(DoubleType()),
+        F.col("CRSArrTime").cast(DoubleType()),
+        F.col("ArrTime").cast(DoubleType()),
+        F.col("ArrDelay").cast(DoubleType()),
+        F.col("Cancelled").cast(DoubleType()),
+        F.col("Diverted").cast(DoubleType()),
+        F.col("Distance").cast(DoubleType()),
+    )
+
+    df = (
+        df
         .filter((F.col("Cancelled") == 0) & (F.col("Diverted") == 0))
         .filter(F.col("DepDelay").isNotNull() & F.col("ArrDelay").isNotNull())
         .filter(F.col("Origin").isin(known_airports) & F.col("Dest").isin(known_airports))
