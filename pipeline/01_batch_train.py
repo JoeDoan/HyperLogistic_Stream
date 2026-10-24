@@ -5,7 +5,7 @@ Phase 1 Offline Batch Pipeline: Feature Engineering + Spark MLlib Model Training
 
 Loads BTS On-Time Performance and NOAA hourly weather using native Spark SQL expressions,
 engineers features without validation leakage, trains GBTRegressor (primary) and
-RandomForestRegressor (baseline) once each, evaluates on 2023 holdout, and serializes
+RandomForestRegressor (baseline) once each, evaluates on the configured holdout year, and serializes
 PipelineModels, lane_mean.parquet, and training_metrics.json to disk.
 
 Usage:
@@ -66,7 +66,8 @@ def resolve_path(cfg_paths: dict, key: str) -> Path:
     return Path(p) if os.path.isabs(p) else (PROJECT_ROOT / p)
 
 
-def build_spark(cores: int = None, shuffle_partitions: int = 64, app_name: str = "HyperLogistics-Batch") -> SparkSession:
+def build_spark(cores: int = None, shuffle_partitions: int = 64, driver_memory: str = "4g",
+                app_name: str = "HyperLogistics-Batch") -> SparkSession:
     core_str = f"local[{cores}]" if cores else "local[*]"
     spark = (
         SparkSession.builder
@@ -75,8 +76,8 @@ def build_spark(cores: int = None, shuffle_partitions: int = 64, app_name: str =
         .config("spark.sql.shuffle.partitions", str(shuffle_partitions))
         .config("spark.sql.adaptive.enabled", "true")
         .config("spark.sql.adaptive.coalescePartitions.enabled", "true")
-        .config("spark.driver.memory", "4g")
-        .config("spark.executor.memory", "4g")
+        .config("spark.driver.memory", driver_memory)
+        .config("spark.executor.memory", driver_memory)
         .config("spark.sql.parquet.compression.codec", "snappy")
         .getOrCreate()
     )
@@ -96,7 +97,7 @@ def load_bts_csv(spark: SparkSession, bts_dir: str, years: list, airports: dict 
     if not all_paths:
         raise FileNotFoundError(
             f"No BTS CSVs found for years {years} in {bts_dir}. "
-            "Run: python scripts/download_bts.py --years 2022 2023 2024 --extract"
+            f"Run: python scripts/download_bts.py --years {' '.join(map(str, years))} --extract"
         )
 
     print(f"[BTS] Found {len(all_paths)} CSV files for years {years}")
@@ -212,7 +213,7 @@ def load_noaa_weather(spark: SparkSession, noaa_dir: str, years: list):
     if not all_paths:
         raise FileNotFoundError(
             f"No NOAA CSVs found in {noaa_dir} for years {years}. "
-            "Run: python scripts/download_noaa.py --years 2022 2023 2024"
+            f"Run: python scripts/download_noaa.py --years {' '.join(map(str, years))}"
         )
 
     print(f"[NOAA] Found {len(all_paths)} station-year files")
@@ -334,7 +335,11 @@ def main():
     print(f"Train years: {train_years}  |  Val year: {val_year}")
     print("=" * 60)
 
-    spark = build_spark(cores=args.cores, shuffle_partitions=args.shuffle_partitions)
+    spark = build_spark(
+        cores=args.cores,
+        shuffle_partitions=args.shuffle_partitions,
+        driver_memory=cfg.get("spark", {}).get("driver_memory", "4g"),
+    )
 
     t0 = time.time()
     bts_raw = load_bts_csv(spark, bts_dir, all_years, airports=airports)
@@ -381,7 +386,7 @@ def main():
 
     assembler = VectorAssembler(inputCols=FEATURE_COLS, outputCol="features", handleInvalid="skip")
 
-    print("\n[EVAL] Computing holdout baselines on 2023:")
+    print(f"\n[EVAL] Computing holdout baselines on {val_year}:")
     baseline_metrics = compute_baselines(val_df)
 
     print("\n[TRAIN] Training GBTRegressor Pipeline...")
