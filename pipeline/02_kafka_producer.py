@@ -40,6 +40,7 @@ except ImportError:
         sys.exit(1)
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
+SHUTDOWN = threading.Event()
 CONFIG_PATH = PROJECT_ROOT / "config" / "pipeline_config.yaml"
 
 AIRPORT_TZ = {
@@ -259,6 +260,7 @@ def emit_events(events, topic: str, producer, rate_eps: int, verbose_every: int 
 
     def handle_sig(*_):
         print("\n[PRODUCER] Interrupt received. Flushing and shutting down...")
+        SHUTDOWN.set()
         _stop.set()
 
     signal.signal(signal.SIGINT, handle_sig)
@@ -364,7 +366,7 @@ def main():
         if args.loop and run_count > 1:
             print(f"\n[PRODUCER] Loop iteration {run_count} - restarting replay...")
         emit_events(events, topic, producer, rate_eps=args.rate)
-        if not args.loop:
+        if not args.loop or SHUTDOWN.is_set():
             break
 
 

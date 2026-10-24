@@ -91,5 +91,5 @@ benchmark:
   ingestion_rates: [1000, 5000, 20000]
   max_offsets: [5000, 20000, 100000]
   runs_per_config: 1
-  warmup_batches: 3
+  warmup_batches: 1                 # --test stops after 4 batches, so 3 are measured
   measure_batches: 10

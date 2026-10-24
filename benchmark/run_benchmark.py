@@ -144,9 +144,11 @@ def run_streaming_job(
     print(f"  Cmd: {' '.join(cmd)}")
 
     t_start = time.time()
-    proc = subprocess.run(
-        cmd, capture_output=True, text=True, timeout=120
-    )
+    try:
+        subprocess.run(cmd, capture_output=True, text=True, timeout=180)
+    except subprocess.TimeoutExpired:
+        print(f"  [BENCH] {label} timed out after 180s")
+        return {"label": label, "error": "timeout", "elapsed": time.time() - t_start}
     elapsed = time.time() - t_start
 
     # Parse metrics from the jsonl file written by the streaming job
