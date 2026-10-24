@@ -427,6 +427,9 @@ def main():
         **baseline_metrics,
         "gbt_mae": gbt_mae,
         "gbt_rmse": gbt_rmse,
+        "gbt_feature_importances": dict(zip(
+            FEATURE_COLS, gbt_pipeline_model.stages[-1].featureImportances.toArray().tolist()
+        )),
         "rf_mae": rf_mae,
         "rf_rmse": rf_rmse,
         "train_years": train_years,
