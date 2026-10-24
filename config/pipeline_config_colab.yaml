@@ -22,7 +22,7 @@ paths:
   benchmark_results: "/content/drive/MyDrive/HyperLogistics/benchmark/results"
 
 training:
-  train_years: [2018, 2019, 2021, 2022]
+  train_years: [2022]
   val_year: 2023
   stream_year: 2024
   gbt_max_iter: 50
@@ -79,7 +79,7 @@ streaming:
   max_offsets_per_trigger: 5000
   window_duration: "1 hour"
   slide_duration: "15 minutes"
-  watermark_delay: "10 minutes"
+  watermark_delay: "6 hours"
   high_risk_threshold_min: 30.0
 
 benchmark:

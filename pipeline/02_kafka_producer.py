@@ -6,38 +6,24 @@ Phase 2 Ingestion: Kafka Time-Replay Engine.
 Replays BTS 2024 flight departure events in chronological WheelsOff order,
 emitting configurable rates (1k / 5k / 20k events/sec) to the 'flights_stream' topic.
 
-Message payload (JSON):
-{
-  "flight_id": "AA1234_20240108_ORD_DFW",
-  "tail_number": "N485PX",
-  "carrier": "AA",
-  "origin": "ORD",
-  "dest": "DFW",
-  "crs_dep_time_utc": "2024-01-08T14:30:00Z",
-  "wheels_off_utc": "2024-01-08T14:45:00Z",
-  "crs_arr_time_utc": "2024-01-08T17:15:00Z",
-  "dep_delay": 15.0,
-  "distance": 802.0,
-  "emit_ts": "2024-01-08T14:45:00Z"
-}
-
 Usage:
     python pipeline/02_kafka_producer.py --rate 1000
     python pipeline/02_kafka_producer.py --rate 5000 --limit 100000
 """
 
-import os
-import sys
+import argparse
 import csv
 import glob
 import json
-import time
+import os
+import re
 import signal
-import argparse
+import sys
 import threading
-from pathlib import Path
-from datetime import datetime, timedelta
+import time
 from collections import deque
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
 import zoneinfo
 
 import yaml
@@ -68,14 +54,17 @@ AIRPORT_TZ = {
 }
 
 
-def load_config():
-    with open(CONFIG_PATH) as f:
+def load_config(config_path: str = None):
+    resolved = config_path or os.environ.get("HYPERLOGISTICS_CONFIG", str(CONFIG_PATH))
+    if not os.path.isabs(resolved):
+        resolved = str(PROJECT_ROOT / resolved)
+    with open(resolved) as f:
         return yaml.safe_load(f)
 
 
-def hhmm_to_utc(flight_date_str: str, hhmm_float, airport_code: str):
-    """Convert BTS HHMM local time to UTC datetime string."""
-    if hhmm_float is None:
+def hhmm_to_utc_dt(flight_date_str: str, hhmm_float, airport_code: str):
+    """Convert BTS HHMM local time to a timezone-aware UTC datetime object."""
+    if hhmm_float is None or str(hhmm_float).strip() == "":
         return None
     tz_name = AIRPORT_TZ.get(airport_code)
     if not tz_name:
@@ -92,14 +81,19 @@ def hhmm_to_utc(flight_date_str: str, hhmm_float, airport_code: str):
         local_dt = fdate.replace(hour=hour, minute=minute) + timedelta(days=extra)
         tz = zoneinfo.ZoneInfo(tz_name)
         local_aware = local_dt.replace(tzinfo=tz)
-        utc_dt = local_aware.astimezone(zoneinfo.ZoneInfo('UTC'))
-        return utc_dt.strftime('%Y-%m-%dT%H:%M:%SZ')
+        return local_aware.astimezone(zoneinfo.ZoneInfo('UTC'))
     except Exception:
         return None
 
 
+def hhmm_to_utc(flight_date_str: str, hhmm_float, airport_code: str):
+    """Convert BTS HHMM local time to UTC ISO-8601 string."""
+    dt = hhmm_to_utc_dt(flight_date_str, hhmm_float, airport_code)
+    return dt.strftime('%Y-%m-%dT%H:%M:%SZ') if dt else None
+
+
 def parse_bts_row(row: dict):
-    """Parse a BTS CSV row into a Kafka message payload. Returns None if invalid."""
+    """Parse a BTS CSV row into a Kafka message payload with midnight rollover protection."""
     try:
         origin = row.get('Origin', '').strip()
         dest = row.get('Dest', '').strip()
@@ -129,14 +123,24 @@ def parse_bts_row(row: dict):
         wheels_off_raw = row.get('WheelsOff') or ''
         crs_arr_raw = row.get('CRSArrTime') or ''
 
-        wheels_off_utc = hhmm_to_utc(flight_date, wheels_off_raw, origin)
-        crs_dep_utc = hhmm_to_utc(flight_date, crs_dep_raw, origin)
-        crs_arr_utc = hhmm_to_utc(flight_date, crs_arr_raw, dest)
+        crs_dep_dt = hhmm_to_utc_dt(flight_date, crs_dep_raw, origin)
+        wheels_off_dt = hhmm_to_utc_dt(flight_date, wheels_off_raw, origin)
+        crs_arr_dt = hhmm_to_utc_dt(flight_date, crs_arr_raw, dest)
 
-        if not wheels_off_utc:
+        if not wheels_off_dt or not crs_arr_dt:
             return None
 
-        flight_id = f"{carrier}{row.get('Flight_Number_Reporting_Airline','0').strip()}_{flight_date.replace('-','')}_{ origin}_{dest}"
+        if crs_dep_dt and wheels_off_dt < crs_dep_dt - timedelta(hours=1):
+            wheels_off_dt += timedelta(days=1)
+        if crs_dep_dt and crs_arr_dt < crs_dep_dt:
+            crs_arr_dt += timedelta(days=1)
+
+        wheels_off_utc = wheels_off_dt.strftime('%Y-%m-%dT%H:%M:%SZ')
+        crs_dep_utc = crs_dep_dt.strftime('%Y-%m-%dT%H:%M:%SZ') if crs_dep_dt else wheels_off_utc
+        crs_arr_utc = crs_arr_dt.strftime('%Y-%m-%dT%H:%M:%SZ')
+
+        flight_id = f"{carrier}{row.get('Flight_Number_Reporting_Airline','0').strip()}_{flight_date.replace('-','')}_{origin}_{dest}"
+        now_ms = int(time.time() * 1000)
 
         return {
             "flight_id": flight_id.replace(' ', ''),
@@ -149,26 +153,32 @@ def parse_bts_row(row: dict):
             "crs_arr_time_utc": crs_arr_utc,
             "dep_delay": dep_delay,
             "distance": distance,
-            "emit_ts": datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%S.%f')[:-3] + 'Z',
+            "emit_epoch_ms": now_ms,
+            "emit_ts": datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%S.%f')[:-3] + 'Z',
         }
     except (ValueError, TypeError):
         return None
 
 
+def _month_sort_key(filepath: str):
+    m = re.search(r'_(\d{4})_(\d+)\.csv$', filepath)
+    return (int(m.group(1)), int(m.group(2))) if m else (9999, 99)
+
+
 def load_bts_2024_sorted(bts_dir: str, limit: int = None):
-    """Load all 2024 BTS CSVs, parse into events, sort by WheelsOff UTC."""
+    """Load 2024 BTS CSVs sorted by integer month, parse into events, sort by WheelsOff UTC."""
     pattern = os.path.join(bts_dir, "*2024*.csv")
-    csv_files = sorted(glob.glob(pattern))
+    csv_files = sorted(glob.glob(pattern), key=_month_sort_key)
     if not csv_files:
         raise FileNotFoundError(
             f"No 2024 BTS CSVs in {bts_dir}. "
             "Run: python scripts/download_bts.py --years 2024 --extract"
         )
 
-    print(f"[PRODUCER] Loading BTS 2024 from {len(csv_files)} file(s)...")
+    print(f"[PRODUCER] Loading BTS 2024 from {len(csv_files)} file(s)...", flush=True)
     events = []
     for filepath in csv_files:
-        print(f"  Parsing {Path(filepath).name}...")
+        print(f"  Parsing {Path(filepath).name}...", flush=True)
         with open(filepath, 'r', encoding='utf-8', errors='replace') as f:
             reader = csv.DictReader(f)
             for row in reader:
@@ -180,12 +190,12 @@ def load_bts_2024_sorted(bts_dir: str, limit: int = None):
         if limit and len(events) >= limit * 2:
             break
 
-    print(f"[PRODUCER] Parsed {len(events):,} valid events. Sorting by WheelsOff...")
+    print(f"[PRODUCER] Parsed {len(events):,} valid events. Sorting by WheelsOff...", flush=True)
     events.sort(key=lambda x: x[0])
     result = [e[1] for e in events]
     if limit:
         result = result[:limit]
-    print(f"[PRODUCER] Ready to emit {len(result):,} events.")
+    print(f"[PRODUCER] Ready to emit {len(result):,} events.", flush=True)
     return result
 
 
@@ -237,11 +247,11 @@ def make_kafka_python_producer(bootstrap_servers: str):
 
 
 def emit_events(events, topic: str, producer, rate_eps: int, verbose_every: int = 5000):
-    """Emit events at target rate with token-bucket throttling."""
+    """Emit events at target rate with token-bucket throttling and emission-time stamping."""
     counter = ThroughputCounter(window_sec=5)
     total_sent = 0
     total_errors = 0
-    interval_ns = int(1e9 / rate_eps)  # nanoseconds between events
+    interval_ns = int(1e9 / rate_eps)
     start_wall = time.monotonic()
     next_emit = start_wall
 
@@ -271,12 +281,14 @@ def emit_events(events, topic: str, producer, rate_eps: int, verbose_every: int 
         if _stop.is_set():
             break
 
-        # Token-bucket rate control
         now = time.monotonic()
         sleep_ns = (next_emit - now) * 1e9
         if sleep_ns > 0:
             time.sleep(sleep_ns / 1e9)
         next_emit = max(time.monotonic(), next_emit) + interval_ns / 1e9
+
+        payload["emit_epoch_ms"] = int(time.time() * 1000)
+        payload["emit_ts"] = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%S.%f')[:-3] + 'Z'
 
         msg_bytes = json.dumps(payload).encode('utf-8')
         key = payload['dest'].encode('utf-8')
@@ -288,16 +300,14 @@ def emit_events(events, topic: str, producer, rate_eps: int, verbose_every: int 
                     producer.poll(0)
             else:
                 producer.send(topic, value=payload, key=key)
-        except Exception as e:
+            counter.record()
+            total_sent += 1
+        except Exception:
             total_errors += 1
 
-        counter.record()
-        total_sent += 1
-
     _stop.set()
-    print()  # newline after status line
+    print()
 
-    # Flush remaining
     if CONFLUENT:
         print("[PRODUCER] Flushing Confluent producer...")
         producer.flush(timeout=30)
@@ -314,6 +324,7 @@ def emit_events(events, topic: str, producer, rate_eps: int, verbose_every: int 
 
 def main():
     parser = argparse.ArgumentParser(description="HyperLogistics Kafka Producer (Time-Replay Engine)")
+    parser.add_argument("--config", type=str, default=None, help="Path to YAML config file")
     parser.add_argument("--rate", type=int, default=1000,
                         help="Target emission rate in events/sec (default: 1000)")
     parser.add_argument("--limit", type=int, default=None,
@@ -326,10 +337,11 @@ def main():
                         help="Loop forever (restart after all events emitted)")
     args = parser.parse_args()
 
-    cfg = load_config()
+    cfg = load_config(args.config)
     bootstrap_servers = args.bootstrap or cfg["kafka"]["bootstrap_servers"]
     topic = args.topic or cfg["kafka"]["topic"]
-    bts_dir = str(PROJECT_ROOT / cfg["paths"]["raw_bts"])
+    raw_bts = cfg["paths"]["raw_bts"]
+    bts_dir = raw_bts if os.path.isabs(raw_bts) else str(PROJECT_ROOT / raw_bts)
 
     print("=" * 60)
     print(f"HyperLogistics-Stream: Kafka Producer")
@@ -350,7 +362,7 @@ def main():
     while True:
         run_count += 1
         if args.loop and run_count > 1:
-            print(f"\n[PRODUCER] Loop iteration {run_count} — restarting replay...")
+            print(f"\n[PRODUCER] Loop iteration {run_count} - restarting replay...")
         emit_events(events, topic, producer, rate_eps=args.rate)
         if not args.loop:
             break

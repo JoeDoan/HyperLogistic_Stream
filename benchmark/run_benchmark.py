@@ -43,9 +43,15 @@ CONFIG_PATH = PROJECT_ROOT / "config" / "pipeline_config.yaml"
 RESULTS_DIR = PROJECT_ROOT / "benchmark" / "results"
 
 
-def load_config():
-    with open(CONFIG_PATH) as f:
+def load_config(config_path: str = None):
+    path = config_path or os.environ.get("HYPERLOGISTICS_CONFIG", str(CONFIG_PATH))
+    with open(path) as f:
         return yaml.safe_load(f)
+
+
+def get_results_dir(cfg: dict) -> Path:
+    res_path = cfg["paths"]["benchmark_results"]
+    return Path(res_path) if os.path.isabs(res_path) else (PROJECT_ROOT / res_path)
 
 
 def grid_configs(cfg: dict, quick: bool = False) -> list[dict]:
@@ -75,7 +81,7 @@ def grid_configs(cfg: dict, quick: bool = False) -> list[dict]:
 
 
 def start_producer(bootstrap: str, topic: str, rate: int, limit: int = 50000) -> subprocess.Popen:
-    """Start Kafka producer subprocess."""
+    """Start Kafka producer subprocess in loop mode so emission continues throughout Spark startup."""
     cmd = [
         sys.executable,
         str(PROJECT_ROOT / "pipeline" / "02_kafka_producer.py"),
@@ -83,6 +89,7 @@ def start_producer(bootstrap: str, topic: str, rate: int, limit: int = 50000) ->
         "--limit", str(limit),
         "--bootstrap", bootstrap,
         "--topic", topic,
+        "--loop",
     ]
     proc = subprocess.Popen(
         cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
@@ -91,11 +98,18 @@ def start_producer(bootstrap: str, topic: str, rate: int, limit: int = 50000) ->
     return proc
 
 
-def drain_proc_output(proc: subprocess.Popen, prefix: str = "[PRODUCER]"):
-    """Read subprocess output in a background thread."""
+def drain_proc_output(
+    proc: subprocess.Popen,
+    prefix: str = "[PRODUCER]",
+    ready_event: threading.Event = None,
+):
+    """Read subprocess output in a background thread and signal when ready."""
     def _drain():
         for line in proc.stdout:
-            print(f"{prefix} {line.rstrip()}")
+            text = line.rstrip()
+            print(f"{prefix} {text}")
+            if ready_event is not None and "Ready to emit" in text:
+                ready_event.set()
     t = threading.Thread(target=_drain, daemon=True)
     t.start()
     return t
@@ -113,6 +127,7 @@ def run_streaming_job(
 ) -> dict:
     """Run the Spark streaming job as subprocess, parse metrics output."""
     bootstrap = bootstrap or cfg["kafka"]["bootstrap_servers"]
+    results_dir = get_results_dir(cfg)
 
     cmd = [
         sys.executable,
@@ -121,7 +136,7 @@ def run_streaming_job(
         "--shuffle-partitions", str(shuffle_partitions),
         "--max-offsets", str(max_offsets),
         "--benchmark-label", label,
-        "--test",  # runs for 30s then exits
+        "--test",
         "--bootstrap", bootstrap,
     ]
 
@@ -135,7 +150,7 @@ def run_streaming_job(
     elapsed = time.time() - t_start
 
     # Parse metrics from the jsonl file written by the streaming job
-    metrics_file = RESULTS_DIR / f"metrics_{label}.jsonl"
+    metrics_file = results_dir / f"metrics_{label}.jsonl"
     if not metrics_file.exists():
         print(f"  [BENCH] No metrics file found for {label}")
         return {"label": label, "error": "no metrics file", "elapsed": elapsed}
@@ -153,9 +168,10 @@ def run_streaming_job(
 
     df = pd.DataFrame(records)
 
-    # Skip warmup batches
     if len(df) > warmup_batches:
         df = df.iloc[warmup_batches:]
+    elif len(df) > 1:
+        df = df.iloc[1:]
 
     return {
         "label": label,
@@ -225,6 +241,7 @@ def generate_report(df: pd.DataFrame, output_path: Path):
 
 def main():
     parser = argparse.ArgumentParser(description="HyperLogistics RQ2 Benchmark Runner")
+    parser.add_argument("--config", type=str, default=None, help="Path to config YAML")
     parser.add_argument("--quick", action="store_true", help="Run 2×2×2×2 reduced grid")
     parser.add_argument("--cores", type=int, nargs="+", default=None, help="Override core counts")
     parser.add_argument("--shuffle", type=int, nargs="+", default=None, help="Override shuffle partitions")
@@ -233,8 +250,9 @@ def main():
     parser.add_argument("--bootstrap", type=str, default=None, help="Kafka bootstrap servers")
     args = parser.parse_args()
 
-    cfg = load_config()
-    RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+    cfg = load_config(args.config)
+    results_dir = get_results_dir(cfg)
+    results_dir.mkdir(parents=True, exist_ok=True)
 
     # Build config grid
     configs = grid_configs(cfg, quick=args.quick)
@@ -270,18 +288,24 @@ def main():
         print(f"  Cores={config['cores']}  ShufflePartitions={config['shuffle_partitions']}")
         print(f"  IngestionRate={config['ingestion_rate']} eps  MaxOffsets={config['max_offsets']}")
 
-        # 1. Start producer at configured rate
+        # 1. Start producer at configured rate and wait until CSV is parsed
         print(f"  Starting Kafka producer at {config['ingestion_rate']} eps...")
+        ready_event = threading.Event()
         producer_proc = start_producer(
             bootstrap=bootstrap,
             topic=topic,
             rate=config["ingestion_rate"],
             limit=200000,
         )
-        drain_thread = drain_proc_output(producer_proc, prefix=f"  [P-{config['label']}]")
+        drain_proc_output(
+            producer_proc,
+            prefix=f"  [P-{config['label']}]",
+            ready_event=ready_event,
+        )
 
-        # Give producer 3 seconds to fill the topic before Spark starts
-        time.sleep(3)
+        # Wait for producer to finish parsing CSV and start emitting before launching Spark
+        ready_event.wait(timeout=30)
+        time.sleep(2)
 
         # 2. Run streaming job
         result = run_streaming_job(
@@ -304,12 +328,14 @@ def main():
         except subprocess.TimeoutExpired:
             producer_proc.kill()
 
-        print(f"  Result: throughput={result.get('avg_throughput_rps', 'N/A'):.0f} rps  "
-              f"p50_batch={result.get('p50_batch_ms', 'N/A'):.0f} ms  "
-              f"p95_batch={result.get('p95_batch_ms', 'N/A'):.0f} ms")
+        if "error" in result:
+            print(f"  Result: ERROR ({result['error']})")
+        else:
+            print(f"  Result: throughput={result.get('avg_throughput_rps', 0.0):.0f} rps  "
+                  f"p50_batch={result.get('p50_batch_ms', 0.0):.0f} ms  "
+                  f"p95_batch={result.get('p95_batch_ms', 0.0):.0f} ms")
 
-        # Small gap between runs
-        time.sleep(5)
+        time.sleep(2)
 
     total_elapsed = time.time() - total_t
     print(f"\n[BENCH] All {len(configs)} configs completed in {total_elapsed:.0f}s")
@@ -317,10 +343,10 @@ def main():
     # Summarize and save
     summary_df = summarize_results(all_results)
     if not summary_df.empty:
-        generate_report(summary_df, RESULTS_DIR)
+        generate_report(summary_df, results_dir)
 
     # Save full results as JSON
-    full_results_path = RESULTS_DIR / "benchmark_full_results.json"
+    full_results_path = results_dir / "benchmark_full_results.json"
     with open(full_results_path, "w") as f:
         json.dump(all_results, f, indent=2, default=str)
     print(f"[BENCH] Full results → {full_results_path}")
