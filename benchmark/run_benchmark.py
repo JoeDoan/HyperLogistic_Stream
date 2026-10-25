@@ -39,7 +39,7 @@ import numpy as np
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
-CONFIG_PATH = PROJECT_ROOT / "config" / "pipeline_config.yaml"
+CONFIG_PATH = Path(os.environ.get("HYPERLOGISTICS_CONFIG", PROJECT_ROOT / "config" / "pipeline_config.yaml"))
 RESULTS_DIR = PROJECT_ROOT / "benchmark" / "results"
 
 

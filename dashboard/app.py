@@ -28,7 +28,7 @@ import plotly.express as px
 import plotly.graph_objects as go
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-CONFIG_PATH = PROJECT_ROOT / "config" / "pipeline_config.yaml"
+CONFIG_PATH = Path(os.environ.get("HYPERLOGISTICS_CONFIG", PROJECT_ROOT / "config" / "pipeline_config.yaml"))
 
 HUB_COORDS = {
     "ORD": (41.9742, -87.9073, "Chicago O'Hare"),

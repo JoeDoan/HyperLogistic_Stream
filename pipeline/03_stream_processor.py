@@ -39,7 +39,7 @@ from pyspark.ml import PipelineModel
 from pyspark.sql.streaming import DataStreamWriter
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-CONFIG_PATH = PROJECT_ROOT / "config" / "pipeline_config.yaml"
+CONFIG_PATH = Path(os.environ.get("HYPERLOGISTICS_CONFIG", PROJECT_ROOT / "config" / "pipeline_config.yaml"))
 
 # Kafka message JSON schema (matches producer payload)
 FLIGHT_SCHEMA = StructType([

@@ -54,7 +54,7 @@ except ImportError:
         sys.exit(1)
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-CONFIG_PATH = PROJECT_ROOT / "config" / "pipeline_config.yaml"
+CONFIG_PATH = Path(os.environ.get("HYPERLOGISTICS_CONFIG", PROJECT_ROOT / "config" / "pipeline_config.yaml"))
 
 AIRPORT_TZ = {
     'ATL': 'America/New_York', 'ORD': 'America/Chicago', 'DFW': 'America/Chicago',
