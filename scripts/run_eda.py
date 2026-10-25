@@ -20,7 +20,7 @@ import seaborn as sns
 
 # Set publication style
 plt.style.use('seaborn-v0_8-whitegrid' if 'seaborn-v0_8-whitegrid' in plt.style.available else 'default')
-plt.rcParams['font.sans-serif'] = 'Helvetica, Arial, sans-serif'
+plt.rcParams['font.sans-serif'] = ['Helvetica', 'Arial', 'DejaVu Sans']
 plt.rcParams['axes.edgecolor'] = '#cccccc'
 plt.rcParams['axes.linewidth'] = 0.8
 

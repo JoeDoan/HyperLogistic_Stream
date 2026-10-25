@@ -10,8 +10,10 @@ Usage:
 """
 
 import argparse
+import json
 import os
 import glob
+import time
 from pathlib import Path
 
 import yaml
@@ -50,7 +52,7 @@ def create_spark(cores: int, shuffle_partitions: int) -> SparkSession:
         .appName("HyperLogistics-BatchTrain")
         .master(f"local[{cores}]")
         .config("spark.sql.shuffle.partitions", str(shuffle_partitions))
-        .config("spark.driver.memory", "4g")
+        .config("spark.driver.memory", os.environ.get("SPARK_DRIVER_MEM", "4g"))
         .config("spark.sql.adaptive.enabled", "false")
         .getOrCreate()
     )
@@ -158,10 +160,14 @@ def add_utc_timestamps(df, airports: dict):
 # Lane mean delay
 # ---------------------------------------------------------------------------
 
-def add_lane_mean_delay(df):
+def add_lane_mean_delay(df, train_years):
+    """Lane statistics computed from TRAINING years only, so validation labels
+    never leak into the features or the lane-mean baseline."""
     lane_stats = (
-        df.groupBy("Origin", "Dest")
-        .agg(F.mean("ArrDelay").alias("LaneMeanDelay"))
+        df.filter(F.col("Year").isin(train_years))
+        .groupBy("Origin", "Dest")
+        .agg(F.mean("ArrDelay").alias("LaneMeanDelay"),
+             F.mean("delta_delay").alias("LaneMeanDelta"))
     )
     return df.join(lane_stats, on=["Origin", "Dest"], how="left")
 
@@ -267,7 +273,7 @@ def train_and_evaluate(train_df, val_df, train_cfg: dict, skip_rf: bool):
     )
     print("  Training GBT...")
     gbt_model = Pipeline(stages=[assembler, gbt]).fit(train_df)
-    _print_metrics(gbt_model, val_df, "GBT")
+    metrics = {"gbt": _print_metrics(gbt_model, val_df, "GBT")}
 
     rf_model = None
     if not skip_rf:
@@ -277,25 +283,31 @@ def train_and_evaluate(train_df, val_df, train_cfg: dict, skip_rf: bool):
         )
         print("  Training RandomForest...")
         rf_model = Pipeline(stages=[assembler, rf]).fit(train_df)
-        _print_metrics(rf_model, val_df, "RandomForest")
+        metrics["rf"] = _print_metrics(rf_model, val_df, "RandomForest")
 
-    return gbt_model, rf_model
+    return gbt_model, rf_model, metrics
 
 
-def _print_metrics(model, val_df, name: str):
+def _print_metrics(model, val_df, name: str) -> dict:
     preds = model.transform(val_df)
-    mae  = RegressionEvaluator(labelCol=LABEL_COL, metricName="mae").evaluate(preds)
-    rmse = RegressionEvaluator(labelCol=LABEL_COL, metricName="rmse").evaluate(preds)
+    ev = lambda m, d: RegressionEvaluator(labelCol=LABEL_COL, metricName=m).evaluate(d)
+    mae, rmse = ev("mae", preds), ev("rmse", preds)
 
-    b1_mae = RegressionEvaluator(labelCol=LABEL_COL, metricName="mae").evaluate(
-        preds.withColumn("prediction", F.lit(0.0)))
-    b2_mae = RegressionEvaluator(labelCol=LABEL_COL, metricName="mae").evaluate(
-        preds.withColumn("prediction", F.col("LaneMeanDelay") - F.col("DepDelay")))
+    # Baseline 1: delay unchanged  -> predicted delta = 0
+    b1 = preds.withColumn("prediction", F.lit(0.0))
+    # Baseline 2: lane mean of delta_delay (training years only)
+    b2 = preds.withColumn("prediction", F.col("LaneMeanDelta"))
 
-    print(f"\n  --- {name} (2023 holdout) ---")
+    out = {
+        "mae": mae, "rmse": rmse,
+        "baseline_nochange_mae": ev("mae", b1), "baseline_nochange_rmse": ev("rmse", b1),
+        "baseline_lanemean_mae": ev("mae", b2), "baseline_lanemean_rmse": ev("rmse", b2),
+    }
+    print(f"\n  --- {name} (validation holdout) ---")
     print(f"  {name:<20} MAE={mae:.3f}  RMSE={rmse:.3f}")
-    print(f"  Baseline no-change     MAE={b1_mae:.3f}")
-    print(f"  Baseline lane-mean     MAE={b2_mae:.3f}")
+    print(f"  Baseline no-change     MAE={out['baseline_nochange_mae']:.3f}  RMSE={out['baseline_nochange_rmse']:.3f}")
+    print(f"  Baseline lane-mean     MAE={out['baseline_lanemean_mae']:.3f}  RMSE={out['baseline_lanemean_rmse']:.3f}")
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -338,6 +350,7 @@ def main():
     print(f"  Train years : {train_yrs}  |  Val year: {val_yr}")
     print(f"  Cores: {args.cores}  |  Shuffle partitions: {args.shuffle_partitions}")
 
+    t0 = time.time()
     spark = create_spark(args.cores, args.shuffle_partitions)
     spark.sparkContext.setLogLevel("WARN")
 
@@ -348,26 +361,27 @@ def main():
     flights = add_utc_timestamps(flights, airports)
 
     print("[3/5] Computing lane mean delay...")
-    flights = add_lane_mean_delay(flights)
+    flights = add_lane_mean_delay(flights, train_yrs)
 
     print("[4/5] Loading and joining NOAA weather...")
     noaa    = load_noaa(spark, raw_noaa, all_years)
     flights = join_weather(flights, noaa, airports)
 
-    keep_cols = FEATURE_COLS + [LABEL_COL, "Year", "Origin", "Dest",
+    keep_cols = FEATURE_COLS + [LABEL_COL, "LaneMeanDelta", "Year", "Origin", "Dest",
                                 "FlightDate", "Reporting_Airline"]
     flights_clean = (
         flights.select(keep_cols)
-        .dropna(subset=FEATURE_COLS + [LABEL_COL])
+        .dropna(subset=FEATURE_COLS + [LABEL_COL, "LaneMeanDelta"])
         .cache()
     )
 
     train_df = flights_clean.filter(F.col("Year").isin(train_yrs))
     val_df   = flights_clean.filter(F.col("Year") == val_yr)
-    print(f"  Train rows: {train_df.count():,}  |  Val rows: {val_df.count():,}")
+    n_train, n_val = train_df.count(), val_df.count()
+    print(f"  Train rows: {n_train:,}  |  Val rows: {n_val:,}")
 
     print("[5/5] Training models...")
-    gbt_model, rf_model = train_and_evaluate(train_df, val_df, train_cfg, args.skip_rf)
+    gbt_model, rf_model, metrics = train_and_evaluate(train_df, val_df, train_cfg, args.skip_rf)
 
     gbt_path = os.path.join(models_dir, "gbt_pipeline_v1")
     gbt_model.write().overwrite().save(gbt_path)
@@ -377,6 +391,18 @@ def main():
         rf_path = os.path.join(models_dir, "rf_pipeline_v1")
         rf_model.write().overwrite().save(rf_path)
         print(f"  RF  saved → {rf_path}")
+
+    out = {
+        "train_years": train_yrs, "val_year": val_yr,
+        "train_count": n_train, "val_count": n_val,
+        "gbt_mae": metrics["gbt"]["mae"], "gbt_rmse": metrics["gbt"]["rmse"],
+        "total_elapsed_sec": round(time.time() - t0, 1),
+        "details": metrics,
+    }
+    metrics_path = os.path.join(models_dir, "training_metrics.json")
+    with open(metrics_path, "w") as f:
+        json.dump(out, f, indent=2)
+    print(f"  Metrics saved → {metrics_path}")
 
     print("\n=== Batch Training Complete ===")
     spark.stop()
