@@ -28,36 +28,50 @@ import plotly.express as px
 import plotly.graph_objects as go
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-CONFIG_PATH = Path(os.environ.get("HYPERLOGISTICS_CONFIG", PROJECT_ROOT / "config" / "pipeline_config.yaml"))
+CONFIG_PATH = PROJECT_ROOT / "config" / "pipeline_config.yaml"
 
 HUB_COORDS = {
+    "ATL": (33.6407, -84.4277, "Atlanta Hartsfield"),
     "ORD": (41.9742, -87.9073, "Chicago O'Hare"),
     "DFW": (32.8998, -97.0403, "Dallas/Fort Worth"),
-    "ATL": (33.6407, -84.4277, "Atlanta Hartsfield"),
+    "DEN": (39.8561, -104.6737, "Denver"),
+    "LAX": (33.9425, -118.4081, "Los Angeles"),
+    "JFK": (40.6413, -73.7781, "New York JFK"),
+    "EWR": (40.6895, -74.1745, "Newark Liberty"),
+    "SFO": (37.6213, -122.3790, "San Francisco"),
     "MEM": (35.0424, -89.9767, "Memphis (FedEx Hub)"),
     "SDF": (38.1744, -85.7360, "Louisville (UPS Hub)"),
     "CVG": (39.0489, -84.6678, "Cincinnati (Amazon Air)"),
-    "LAX": (33.9425, -118.4081, "Los Angeles"),
-    "JFK": (40.6413, -73.7781, "New York JFK"),
-    "ORD": (41.9742, -87.9073, "Chicago O'Hare"),
-    "DEN": (39.8561, -104.6737, "Denver"),
-    "SEA": (47.4502, -122.3088, "Seattle-Tacoma"),
-    "BOS": (42.3656, -71.0096, "Boston Logan"),
+    "CLT": (35.2140, -80.9431, "Charlotte Douglas"),
+    "LAS": (36.0840, -115.1537, "Las Vegas"),
+    "PHX": (33.4352, -112.0101, "Phoenix Sky Harbor"),
     "MIA": (25.7959, -80.2870, "Miami"),
     "IAH": (29.9844, -95.3414, "Houston"),
+    "BOS": (42.3656, -71.0096, "Boston Logan"),
+    "SEA": (47.4502, -122.3088, "Seattle-Tacoma"),
     "MSP": (44.8848, -93.2223, "Minneapolis"),
+    "DTW": (42.2162, -83.3554, "Detroit Metro"),
+    "PHL": (39.8744, -75.2424, "Philadelphia"),
+    "BWI": (39.1774, -76.6684, "Baltimore/Washington"),
+    "SLC": (40.7899, -111.9791, "Salt Lake City"),
+    "MCO": (28.4312, -81.3081, "Orlando"),
 }
 
 
 def load_config():
-    with open(CONFIG_PATH) as f:
+    cfg_path = os.environ.get("HYPERLOGISTICS_CONFIG", str(CONFIG_PATH))
+    with open(cfg_path) as f:
         return yaml.safe_load(f)
+
+
+def resolve_path(base_path: str) -> Path:
+    return Path(base_path) if os.path.isabs(base_path) else (PROJECT_ROOT / base_path)
 
 
 @st.cache_data(ttl=10)  # refresh every 10 seconds
 def read_gold_predictions(max_rows: int = 2000) -> pd.DataFrame:
     cfg = load_config()
-    gold_path = PROJECT_ROOT / cfg["paths"]["gold_predictions"]
+    gold_path = resolve_path(cfg["paths"]["gold_predictions"])
     if not gold_path.exists():
         return pd.DataFrame()
 
@@ -85,7 +99,7 @@ def read_gold_predictions(max_rows: int = 2000) -> pd.DataFrame:
 @st.cache_data(ttl=10)
 def read_hub_congestion() -> pd.DataFrame:
     cfg = load_config()
-    agg_path = PROJECT_ROOT / cfg["paths"]["gold_congestion"]
+    agg_path = resolve_path(cfg["paths"]["gold_congestion"])
     if not agg_path.exists():
         return pd.DataFrame()
 
@@ -108,7 +122,7 @@ def read_hub_congestion() -> pd.DataFrame:
 @st.cache_data(ttl=10)
 def read_benchmark_results() -> pd.DataFrame:
     cfg = load_config()
-    bench_dir = PROJECT_ROOT / cfg["paths"]["benchmark_results"]
+    bench_dir = resolve_path(cfg["paths"]["benchmark_results"])
     if not bench_dir.exists():
         return pd.DataFrame()
 
@@ -261,7 +275,7 @@ def render_fleet_map(flights_df: pd.DataFrame):
 
 def render_hub_pressure(congestion_df: pd.DataFrame):
     """Bar chart of inbound arrival counts per hub."""
-    st.subheader("Hub Inbound Pressure (Next 4 Hours)")
+    st.subheader("Hub Inbound Pressure (Latest 1-Hour Window)")
 
     top_hubs = ["ORD", "DFW", "ATL", "MEM", "SDF", "CVG"]
 
@@ -279,20 +293,21 @@ def render_hub_pressure(congestion_df: pd.DataFrame):
         congestion_df = pd.DataFrame(rows)
         st.info("No live congestion data — showing synthetic demo data.")
     else:
-        if "window_start" in congestion_df.columns:
+        congestion_df = congestion_df[congestion_df["dest"].isin(top_hubs)].copy()
+        if "window_start" in congestion_df.columns and not congestion_df.empty:
             congestion_df["window_start"] = pd.to_datetime(congestion_df["window_start"])
-            cutoff = datetime.utcnow() + timedelta(hours=4)
-            congestion_df = congestion_df[congestion_df["window_start"] <= cutoff]
+            anchor = congestion_df["window_start"].max()
+            congestion_df = congestion_df[
+                (congestion_df["window_start"] >= anchor - pd.Timedelta(hours=1))
+                & (congestion_df["window_start"] <= anchor + pd.Timedelta(hours=4))
+            ]
+            congestion_df = congestion_df.sort_values("window_start")
 
-        congestion_df = (
-            congestion_df[congestion_df["dest"].isin(top_hubs)]
-            .groupby("dest", as_index=False)
-            .agg(
-                inbound_count=("inbound_count", "sum"),
-                avg_predicted_delta=("avg_predicted_delta", "mean"),
-                high_risk_count=("high_risk_count", "sum"),
+        if not congestion_df.empty:
+            congestion_df = (
+                congestion_df.groupby("dest", as_index=False)
+                .last()[["dest", "inbound_count", "avg_predicted_delta", "high_risk_count"]]
             )
-        )
 
     if congestion_df.empty:
         st.warning("No hub data available.")
@@ -330,7 +345,7 @@ def render_system_health(benchmark_df: pd.DataFrame):
     st.subheader("System Health")
 
     cfg = load_config()
-    gold_path = PROJECT_ROOT / cfg["paths"]["gold_predictions"]
+    gold_path = resolve_path(cfg["paths"]["gold_predictions"])
 
     # Count recent gold records
     recent_count = 0

@@ -13,9 +13,11 @@ Usage:
     python benchmark/analyze_results.py
 """
 
+import os
 import json
 from pathlib import Path
 
+import yaml
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
@@ -23,7 +25,20 @@ import matplotlib.cm as cm
 import seaborn as sns
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-RESULTS_DIR = PROJECT_ROOT / "benchmark" / "results"
+CONFIG_PATH = PROJECT_ROOT / "config" / "pipeline_config.yaml"
+
+
+def _get_results_dir() -> Path:
+    cfg_path = os.environ.get("HYPERLOGISTICS_CONFIG", str(CONFIG_PATH))
+    if Path(cfg_path).exists():
+        with open(cfg_path) as f:
+            cfg = yaml.safe_load(f)
+        res_path = cfg["paths"]["benchmark_results"]
+        return Path(res_path) if os.path.isabs(res_path) else (PROJECT_ROOT / res_path)
+    return PROJECT_ROOT / "benchmark" / "results"
+
+
+RESULTS_DIR = _get_results_dir()
 FIGS_DIR = PROJECT_ROOT / "reports" / "figures"
 
 plt.style.use("seaborn-v0_8-whitegrid" if "seaborn-v0_8-whitegrid" in plt.style.available else "default")

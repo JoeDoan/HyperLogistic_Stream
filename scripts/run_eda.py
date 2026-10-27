@@ -20,7 +20,7 @@ import seaborn as sns
 
 # Set publication style
 plt.style.use('seaborn-v0_8-whitegrid' if 'seaborn-v0_8-whitegrid' in plt.style.available else 'default')
-plt.rcParams['font.sans-serif'] = ['Helvetica', 'Arial', 'DejaVu Sans']
+plt.rcParams['font.sans-serif'] = 'Helvetica, Arial, sans-serif'
 plt.rcParams['axes.edgecolor'] = '#cccccc'
 plt.rcParams['axes.linewidth'] = 0.8
 
@@ -88,6 +88,7 @@ def clean_bts_data(bts_csv_path: str, max_rows: int = 150000) -> pd.DataFrame:
     df['delta_delay'] = df['ArrDelay'] - df['DepDelay']
 
     # 4. Resolve timezones and construct UTC departure & arrival timestamps
+    utc_sched_dep = []
     utc_wheels_off = []
     utc_sched_arr = []
     sched_arr_hour_utc = []
@@ -96,18 +97,27 @@ def clean_bts_data(bts_csv_path: str, max_rows: int = 150000) -> pd.DataFrame:
         fdate_str = str(row['FlightDate'])
         fdate = datetime.strptime(fdate_str, '%Y-%m-%d')
         
-        # Origin timezone for WheelsOff
+        # Origin timezone for CRSDepTime and WheelsOff
         orig_tz_name = AIRPORT_METADATA[row['Origin']]['tz']
         orig_tz = zoneinfo.ZoneInfo(orig_tz_name)
         
+        dep_parsed = parse_hhmm_to_time(row['CRSDepTime'])
+        if dep_parsed:
+            dep_dt = fdate.replace(hour=dep_parsed[0], minute=dep_parsed[1]) + timedelta(days=dep_parsed[2])
+            dep_dt_aware = dep_dt.replace(tzinfo=orig_tz)
+            crs_dep_utc = dep_dt_aware.astimezone(zoneinfo.ZoneInfo('UTC'))
+        else:
+            crs_dep_utc = None
+
         wo_parsed = parse_hhmm_to_time(row['WheelsOff'])
         if wo_parsed:
             wo_dt = fdate.replace(hour=wo_parsed[0], minute=wo_parsed[1]) + timedelta(days=wo_parsed[2])
             wo_dt_aware = wo_dt.replace(tzinfo=orig_tz)
             wo_utc = wo_dt_aware.astimezone(zoneinfo.ZoneInfo('UTC'))
-            utc_wheels_off.append(wo_utc)
+            if crs_dep_utc is not None and wo_utc < (crs_dep_utc - timedelta(hours=1)):
+                wo_utc = wo_utc + timedelta(days=1)
         else:
-            utc_wheels_off.append(None)
+            wo_utc = None
 
         # Dest timezone for CRSArrTime
         dest_tz_name = AIRPORT_METADATA[row['Dest']]['tz']
@@ -118,20 +128,26 @@ def clean_bts_data(bts_csv_path: str, max_rows: int = 150000) -> pd.DataFrame:
             arr_dt = fdate.replace(hour=arr_parsed[0], minute=arr_parsed[1]) + timedelta(days=arr_parsed[2])
             arr_dt_aware = arr_dt.replace(tzinfo=dest_tz)
             arr_utc = arr_dt_aware.astimezone(zoneinfo.ZoneInfo('UTC'))
-            utc_sched_arr.append(arr_utc)
-            # Truncate to top of hour for weather joining
-            sched_arr_hour_utc.append(arr_utc.replace(minute=0, second=0, microsecond=0))
+            if crs_dep_utc is not None and arr_utc < crs_dep_utc:
+                arr_utc = arr_utc + timedelta(days=1)
+            arr_hour_utc = arr_utc.replace(minute=0, second=0, microsecond=0)
         else:
-            utc_sched_arr.append(None)
-            sched_arr_hour_utc.append(None)
+            arr_utc = None
+            arr_hour_utc = None
 
+        utc_sched_dep.append(crs_dep_utc)
+        utc_wheels_off.append(wo_utc)
+        utc_sched_arr.append(arr_utc)
+        sched_arr_hour_utc.append(arr_hour_utc)
+
+    df['sched_dep_utc'] = utc_sched_dep
     df['wheels_off_utc'] = utc_wheels_off
     df['sched_arr_utc'] = utc_sched_arr
     df['sched_arr_hour_utc'] = sched_arr_hour_utc
     df['dest_icao'] = df['Dest'].map(lambda d: AIRPORT_METADATA[d]['icao'])
     df['origin_icao'] = df['Origin'].map(lambda o: AIRPORT_METADATA[o]['icao'])
 
-    df = df.dropna(subset=['wheels_off_utc', 'sched_arr_hour_utc'])
+    df = df.dropna(subset=['sched_dep_utc', 'wheels_off_utc', 'sched_arr_hour_utc'])
     print(f"[BTS] Cleaned flights ready: {len(df):,} valid records.")
     return df
 
@@ -298,7 +314,7 @@ def generate_visualizations(joined_df: pd.DataFrame, output_dir: str):
                                        labels=['0-5 kt', '5-10 kt', '10-15 kt', '15-20 kt', '20-25 kt', '>25 kt'])
 
     fig, ax = plt.subplots(figsize=(9, 5))
-    sns.boxplot(x='wind_bin', y='delta_delay', data=valid_weather, ax=ax, palette='Blues', showfliers=False)
+    sns.boxplot(x='wind_bin', y='delta_delay', data=valid_weather, ax=ax, palette='Blues', hue='wind_bin', legend=False, showfliers=False)
     ax.set_title('Destination Wind Speed vs. Airborne Delay Progression (Delta Delay)', fontsize=12, fontweight='bold')
     ax.set_xlabel('Destination Surface Wind Speed (Knots)')
     ax.set_ylabel('Delta Delay (ArrDelay - DepDelay in minutes)')
@@ -353,7 +369,7 @@ def generate_visualizations(joined_df: pd.DataFrame, output_dir: str):
     # -------------------------------------------------------------
     # Figure 4: Diurnal Congestion & Hourly Delay Pattern
     # -------------------------------------------------------------
-    clean_sample['dep_hour'] = clean_sample['wheels_off_utc'].dt.hour
+    clean_sample['dep_hour'] = clean_sample['sched_dep_utc'].dt.hour
     hourly_stats = clean_sample.groupby('dep_hour').agg(
         flight_count=('FlightDate', 'count'),
         avg_dep_delay=('DepDelay', 'mean'),
@@ -392,12 +408,12 @@ def generate_visualizations(joined_df: pd.DataFrame, output_dir: str):
     ).reindex(top_hubs).reset_index()
 
     fig, axes = plt.subplots(1, 2, figsize=(14, 5))
-    sns.barplot(x='Dest', y='inbound_volume', data=hub_metrics, ax=axes[0], palette='crest')
+    sns.barplot(x='Dest', y='inbound_volume', data=hub_metrics, ax=axes[0], palette='crest', hue='Dest', legend=False)
     axes[0].set_title('Inbound Flight Volume by Major Hub', fontsize=12, fontweight='bold')
     axes[0].set_xlabel('Destination Hub')
     axes[0].set_ylabel('Number of Inbound Flights')
 
-    sns.barplot(x='Dest', y='pct_delayed', data=hub_metrics, ax=axes[1], palette='flare')
+    sns.barplot(x='Dest', y='pct_delayed', data=hub_metrics, ax=axes[1], palette='flare', hue='Dest', legend=False)
     axes[1].set_title('Percentage of Inbound Flights Delayed > 15 Minutes', fontsize=12, fontweight='bold')
     axes[1].set_xlabel('Destination Hub')
     axes[1].set_ylabel('Delayed Flights (%)')

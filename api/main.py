@@ -29,12 +29,17 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-CONFIG_PATH = Path(os.environ.get("HYPERLOGISTICS_CONFIG", PROJECT_ROOT / "config" / "pipeline_config.yaml"))
+CONFIG_PATH = PROJECT_ROOT / "config" / "pipeline_config.yaml"
 
 
 def load_config():
-    with open(CONFIG_PATH) as f:
+    cfg_path = os.environ.get("HYPERLOGISTICS_CONFIG", str(CONFIG_PATH))
+    with open(cfg_path) as f:
         return yaml.safe_load(f)
+
+
+def resolve_path(base_path: str) -> Path:
+    return Path(base_path) if os.path.isabs(base_path) else (PROJECT_ROOT / base_path)
 
 
 cfg = load_config()
@@ -88,7 +93,7 @@ class SystemMetrics(BaseModel):
 
 def read_latest_parquet(base_path: str, max_rows: int = 1000):
     """Read the most-recently-written partition from a Parquet directory."""
-    path = PROJECT_ROOT / base_path
+    path = resolve_path(base_path)
     if not path.exists():
         return pd.DataFrame()
 
@@ -141,11 +146,11 @@ async def get_active_flights(
     if df.empty:
         return []
 
-    # Only return recent records (emitted in last 2 hours)
-    if "gold_date" in df.columns:
-        df["gold_date"] = pd.to_datetime(df["gold_date"])
-        cutoff = datetime.utcnow() - timedelta(hours=2)
-        df = df[df["gold_date"] >= cutoff.date()]
+    # Filter to recent partition dates relative to the latest batch date
+    if "gold_date" in df.columns and not df.empty:
+        dates = pd.to_datetime(df["gold_date"]).dt.date
+        anchor_date = dates.max()
+        df = df[dates >= (anchor_date - timedelta(days=1))]
 
     if hub:
         df = df[df["dest"].str.upper() == hub.upper()]
@@ -195,12 +200,13 @@ async def get_hub_congestion(
     if df.empty:
         raise HTTPException(status_code=404, detail=f"No data for hub {hub_code}")
 
-    # Filter to relevant time windows
-    if "window_start" in df.columns:
+    # Filter to relevant time windows anchored to the latest replay watermark
+    if "window_start" in df.columns and not df.empty:
         df["window_start"] = pd.to_datetime(df["window_start"])
         df["window_end"] = pd.to_datetime(df["window_end"])
-        cutoff_start = datetime.utcnow() - timedelta(hours=1)
-        cutoff_end = datetime.utcnow() + timedelta(hours=hours_ahead)
+        anchor = df["window_start"].max()
+        cutoff_start = anchor - timedelta(hours=1)
+        cutoff_end = anchor + timedelta(hours=hours_ahead)
         df = df[(df["window_end"] >= cutoff_start) & (df["window_start"] <= cutoff_end)]
 
     df = df.sort_values("window_start").head(50)
@@ -228,8 +234,8 @@ async def get_hub_congestion(
 @app.get("/api/v1/system/metrics", response_model=SystemMetrics)
 async def get_system_metrics():
     """Return real-time Spark streaming health metrics."""
-    gold_path = PROJECT_ROOT / cfg["paths"]["gold_predictions"]
-    benchmark_dir = PROJECT_ROOT / cfg["paths"]["benchmark_results"]
+    gold_path = resolve_path(cfg["paths"]["gold_predictions"])
+    benchmark_dir = resolve_path(cfg["paths"]["benchmark_results"])
 
     # Count Gold records from last 10 minutes
     recent_count = 0
@@ -271,7 +277,7 @@ async def get_benchmark_results(
     summary: bool = Query(default=True, description="Return aggregated summary"),
 ):
     """Return RQ2 benchmark metrics."""
-    bench_dir = PROJECT_ROOT / cfg["paths"]["benchmark_results"]
+    bench_dir = resolve_path(cfg["paths"]["benchmark_results"])
     if not bench_dir.exists():
         return {"results": [], "summary": {}}
 

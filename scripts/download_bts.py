@@ -17,12 +17,13 @@ BASE_URL = "https://transtats.bts.gov/PREZIP/On_Time_Reporting_Carrier_On_Time_P
 
 def download_file(url: str, dest_path: Path):
     """Download a file with progress bar and custom User-Agent."""
+    tmp_path = dest_path.with_name(dest_path.name + ".part")
     req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)"})
     with urllib.request.urlopen(req, timeout=30) as response:
         total_size = int(response.headers.get("Content-Length", 0))
         block_size = 1024 * 1024  # 1 MB
 
-        with open(dest_path, "wb") as f, tqdm(
+        with open(tmp_path, "wb") as f, tqdm(
             desc=dest_path.name,
             total=total_size,
             unit="iB",
@@ -35,6 +36,12 @@ def download_file(url: str, dest_path: Path):
                     break
                 f.write(chunk)
                 bar.update(len(chunk))
+
+    received = tmp_path.stat().st_size
+    if total_size and received != total_size:
+        tmp_path.unlink()
+        raise IOError(f"Incomplete download: got {received} of {total_size} bytes")
+    tmp_path.replace(dest_path)
 
 def extract_zip(zip_path: Path, extract_dir: Path):
     """Extract CSV from BTS zip file if not already extracted."""
@@ -70,7 +77,7 @@ def main():
             zip_dest = out_dir / filename
             url = BASE_URL.format(year=year, month=month)
 
-            if zip_dest.exists() and zip_dest.stat().st_size > 1024 * 1024:
+            if zip_dest.exists() and zipfile.is_zipfile(zip_dest):
                 print(f"[SKIP] {filename} already exists ({zip_dest.stat().st_size / (1024*1024):.1f} MB)")
             else:
                 print(f"[DOWNLOADING] {url}")
