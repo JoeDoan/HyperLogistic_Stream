@@ -715,8 +715,6 @@ If you fall behind, cut from the top down. Never cut the protected items.
 
 - [x] Submission date: **Nov 9**
 - [x] Track: AI / Data Science
-- [x] Capacity: a few hours per day each
-- [x] Joe agrees with the split
 - [ ] Judging criteria and deliverable sizes (poster size, video length): find in the track rules by Oct 28
 - [ ] Confirm MEM, SDF and CVG appear in the Gold data (quick count on Oct 27)
 - [ ] Choose the LLM provider (Anthropic API key, or Snowflake Cortex as in the earlier project), where the key lives, and check the event rules allow external API calls (decide by Nov 1)
