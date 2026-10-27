@@ -184,7 +184,7 @@ def demo_flights_df() -> pd.DataFrame:
             "dest_lat": d_lat, "dest_lon": d_lon,
             "dep_delay": dep_delay,
             "predicted_delta_delay": predicted_delta,
-            "is_high_risk": predicted_delta > 30,
+            "is_high_risk": predicted_delta > 5,
         })
     return pd.DataFrame(rows)
 
@@ -196,6 +196,8 @@ def render_fleet_map(flights_df: pd.DataFrame):
     if flights_df.empty:
         st.info("No live flight data — showing synthetic demo data.")
         flights_df = demo_flights_df()
+        # Remove duplicate flights and add live data to the dashboard 
+        flights_df = flights_df.drop_duplicates("flight_id", keep="last") 
 
     # Add coordinates
     if "origin_lat" not in flights_df.columns:
@@ -249,7 +251,7 @@ def render_fleet_map(flights_df: pd.DataFrame):
         # Fallback to plotly scatter
         fig = go.Figure()
         for _, row in flights_df.iterrows():
-            color = "red" if row["is_high_risk"] else ("orange" if row["predicted_delta_delay"] > 15 else "green")
+            color = "red" if row["is_high_risk"] else ("orange" if row["predicted_delta_delay"] > 2 else "green")
             fig.add_trace(go.Scattergeo(
                 lon=[row["origin_lon"], row["dest_lon"]],
                 lat=[row["origin_lat"], row["dest_lat"]],
@@ -277,10 +279,10 @@ def render_fleet_map(flights_df: pd.DataFrame):
 
     col1, col2, col3 = st.columns(3)
     with col1:
-        st.metric("Active Flights", len(flights_df))
+        st.metric("Flights shown (latest)", f"{flights_df['flight_id'].nunique():,}") # Total unique flights
     with col2:
         high_risk = int(flights_df["is_high_risk"].sum())
-        st.metric("High-Risk (Δ>30m)", high_risk, delta=None)
+        st.metric("Elevated risk (Δ>5m)", high_risk, delta=None)
     with col3:
         avg_delta = float(flights_df["predicted_delta_delay"].mean())
         st.metric("Avg Predicted Δ Delay", f"{avg_delta:.1f} min")
@@ -290,7 +292,7 @@ def render_hub_pressure(congestion_df: pd.DataFrame):
     """Bar chart of inbound arrival counts per hub."""
     st.subheader("Hub Inbound Pressure (Latest 1-Hour Window)")
 
-    top_hubs = ["ORD", "DFW", "ATL", "MEM", "SDF", "CVG"]
+    top_hubs = ["ATL", "DEN", "ORD", "DFW", "LAX", "PHX", "LAS", "MCO"] # List of top hubs
 
     if congestion_df.empty:
         # Generate demo congestion
@@ -336,6 +338,8 @@ def render_hub_pressure(congestion_df: pd.DataFrame):
             congestion_df, x="dest", y="inbound_count",
             color="avg_predicted_delta",
             color_continuous_scale="RdYlGn_r",
+            range_color=[-30, 30],
+            color_continuous_midpoint=0,
             labels={"dest": "Hub", "inbound_count": "Inbound Flights", "avg_predicted_delta": "Avg Δ Delay (min)"},
             title="Inbound Flight Volume",
         )
@@ -347,7 +351,7 @@ def render_hub_pressure(congestion_df: pd.DataFrame):
             congestion_df, x="dest", y="high_risk_count",
             color_discrete_sequence=["#dc2626"],
             labels={"dest": "Hub", "high_risk_count": "High-Risk Arrivals"},
-            title="High-Risk Arrivals (Δ > 30 min)",
+            title="Elevated-Risk Arrivals (Δ > 5 min)",
         )
         fig2.update_layout(height=350, paper_bgcolor="rgba(0,0,0,0)")
         st.plotly_chart(fig2, use_container_width=True)
