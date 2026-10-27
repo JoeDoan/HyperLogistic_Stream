@@ -198,6 +198,7 @@ def render_fleet_map(flights_df: pd.DataFrame):
 
     flights_df = flights_df.dropna(subset=["origin_lat", "dest_lat"])
     flights_df["risk_score"] = flights_df["predicted_delta_delay"].clip(-20, 120)
+    flights_df["predicted_delta_delay"] = flights_df["predicted_delta_delay"].round(1) # Add the roundup 
 
     try:
         import pydeck as pdk
@@ -228,7 +229,7 @@ def render_fleet_map(flights_df: pd.DataFrame):
             initial_view_state=pdk.ViewState(
                 latitude=38.5, longitude=-96.0, zoom=3.5, pitch=30
             ),
-            tooltip={"text": "{flight_id}\n{origin}→{dest}\nDepDelay: {dep_delay}m\nPredicted Δ: {predicted_delta_delay:.1f}m"},
+            tooltip={"text": "{flight_id}\n{origin}→{dest}\nDepDelay: {dep_delay}m\nPredicted Δ: {predicted_delta_delay}m"},
             map_style="mapbox://styles/mapbox/dark-v9",
         )
         st.pydeck_chart(deck)
