@@ -120,7 +120,7 @@ def read_hub_congestion() -> pd.DataFrame:
         return pd.DataFrame()
 
     frames = []
-    for pf in pq_files[:5]:
+    for pf in pq_files[:300]:
         try:
             frames.append(pd.read_parquet(pf))
         except Exception:
@@ -290,7 +290,7 @@ def render_fleet_map(flights_df: pd.DataFrame):
 
 def render_hub_pressure(congestion_df: pd.DataFrame):
     """Bar chart of inbound arrival counts per hub."""
-    st.subheader("Hub Inbound Pressure (Latest 1-Hour Window)")
+    st.subheader("Hub Inbound Pressure (selected arrival hour)")
 
     top_hubs = ["ATL", "DEN", "ORD", "DFW", "LAX", "PHX", "LAS", "MCO"] # List of top hubs
 
@@ -309,28 +309,29 @@ def render_hub_pressure(congestion_df: pd.DataFrame):
         st.info("No live congestion data — showing synthetic demo data.")
     else:
         congestion_df = congestion_df[congestion_df["dest"].isin(top_hubs)].copy()
-        if "window_start" in congestion_df.columns and not congestion_df.empty:
-            congestion_df["window_start"] = pd.to_datetime(congestion_df["window_start"])
-            anchor = congestion_df["window_start"].max()
-            congestion_df = congestion_df[
-                (congestion_df["window_start"] >= anchor - pd.Timedelta(hours=1))
-                & (congestion_df["window_start"] <= anchor + pd.Timedelta(hours=4))
-            ]
-            congestion_df = congestion_df.sort_values("window_start")
-
         if not congestion_df.empty:
-            congestion_df = (
-                congestion_df.groupby("dest", as_index=False)
-                .last()[["dest", "inbound_count", "avg_predicted_delta", "high_risk_count"]]
-            )
+            congestion_df["window_start"] = pd.to_datetime(congestion_df["window_start"])
+            congestion_df["wsum"] = congestion_df["avg_predicted_delta"] * congestion_df["inbound_count"]
+
+            # each micro-batch writes partial counts for the same window, so sum them
+            agg = (congestion_df.groupby(["window_start", "dest"], as_index=False)
+                   .agg(inbound_count=("inbound_count", "sum"),
+                        wsum=("wsum", "sum"),
+                        high_risk_count=("high_risk_count", "sum")))
+            agg["avg_predicted_delta"] = agg["wsum"] / agg["inbound_count"]
+
+            # latest windows in which every hub has flights
+            hubs_per = agg.groupby("window_start")["dest"].nunique()
+            good = hubs_per[hubs_per >= len(top_hubs)].index.sort_values(ascending=False)
+            windows = good.tolist()[:48] or agg["window_start"].sort_values(ascending=False).unique().tolist()[:48]
+            chosen = st.selectbox("Arrival hour (UTC, replay time)", windows,
+                                  format_func=lambda t: pd.Timestamp(t).strftime("%b %d %H:%M"))
+            congestion_df = agg[agg["window_start"] == chosen][
+                ["dest", "inbound_count", "avg_predicted_delta", "high_risk_count"]]
 
     if congestion_df.empty:
         st.warning("No hub data available.")
         return
-
-    congestion_df = congestion_df.reindex(
-        [i for i in range(len(congestion_df)) if congestion_df.iloc[i]["dest"] in top_hubs]
-    ).dropna()
 
     col1, col2 = st.columns(2)
     with col1:
