@@ -63,6 +63,18 @@ def load_config():
     with open(cfg_path) as f:
         return yaml.safe_load(f)
 
+# Add list_parquet_files function for list parquet files
+def list_parquet_files(base: Path) -> list[Path]:
+    """Committed Parquet files, newest first. Skips Spark temp/hidden files and files that vanish mid-scan."""
+    files = []
+    for p in base.rglob("*.parquet"):
+        if any(part.startswith(("_", ".")) for part in p.relative_to(base).parts):
+            continue  # _temporary, _spark_metadata, .crc files
+        try:
+            files.append((p.stat().st_mtime, p))
+        except FileNotFoundError:
+            continue  # moved by Spark between listing and stat
+    return [p for _, p in sorted(files, key=lambda x: x[0], reverse=True)]
 
 def resolve_path(base_path: str) -> Path:
     return Path(base_path) if os.path.isabs(base_path) else (PROJECT_ROOT / base_path)
@@ -75,7 +87,7 @@ def read_gold_predictions(max_rows: int = 2000) -> pd.DataFrame:
     if not gold_path.exists():
         return pd.DataFrame()
 
-    pq_files = sorted(gold_path.rglob("*.parquet"), key=lambda p: p.stat().st_mtime, reverse=True)
+    pq_files = list_parquet_files(gold_path)
     if not pq_files:
         return pd.DataFrame()
 
@@ -103,7 +115,7 @@ def read_hub_congestion() -> pd.DataFrame:
     if not agg_path.exists():
         return pd.DataFrame()
 
-    pq_files = sorted(agg_path.rglob("*.parquet"), key=lambda p: p.stat().st_mtime, reverse=True)
+    pq_files = list_parquet_files(agg_path)
     if not pq_files:
         return pd.DataFrame()
 
@@ -350,7 +362,7 @@ def render_system_health(benchmark_df: pd.DataFrame):
 
     # Count recent gold records
     recent_count = 0
-    pq_files = list(gold_path.rglob("*.parquet")) if gold_path.exists() else []
+    pq_files = list_parquet_files(gold_path) if gold_path.exists() else []
     for pf in pq_files:
         if (time.time() - pf.stat().st_mtime) < 60:
             try:
