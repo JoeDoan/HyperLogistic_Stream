@@ -5,6 +5,9 @@
 **Team:** Tony Nguyen, Joe Doan (2-person team, 2 plans)  
 **Window:** Oct 27 – Nov 9, 2026 (submission Nov 9) · **Track:** AI / Data Science
 
+> [!NOTE]
+> **Update Oct 29:** direction changed after professor feedback (flight data only, data storytelling, live feed). See [PLAN_V2_LIVE_STORY.md](PLAN_V2_LIVE_STORY.md) for the current schedule. The engine, model and benchmark steps below still apply.
+
 ---
 
 > [!IMPORTANT]
