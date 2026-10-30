@@ -136,6 +136,10 @@ def run_streaming_job(
         "--shuffle-partitions", str(shuffle_partitions),
         "--max-offsets", str(max_offsets),
         "--benchmark-label", label,
+        # Isolated output root: benchmark runs never touch the dashboard's Gold tables
+        "--output-root", str(PROJECT_ROOT / "data" / "benchmark_runs" / label),
+        "--reset",
+        "--no-dedupe",  # producer loops over the same flights; dedupe would skew throughput
         "--test",
         "--bootstrap", bootstrap,
     ]

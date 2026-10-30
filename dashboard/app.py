@@ -27,6 +27,8 @@ import streamlit as st
 import plotly.express as px
 import plotly.graph_objects as go
 
+from live_radar import render_live_radar
+
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 CONFIG_PATH = PROJECT_ROOT / "config" / "pipeline_config.yaml"
 
@@ -491,13 +493,19 @@ def main():
     benchmark_df = read_benchmark_results()
 
     # Render panels
-    render_fleet_map(flights_df)
-    st.divider()
-    render_hub_pressure(congestion_df)
-    st.divider()
-    render_system_health(benchmark_df)
-    st.divider()
-    render_benchmark(benchmark_df)
+    tab_live, tab_replay = st.tabs(["Live Radar", "Replay & Benchmark"])
+
+    with tab_live:
+        render_live_radar(HUB_COORDS)
+
+    with tab_replay:
+        render_fleet_map(flights_df)
+        st.divider()
+        render_hub_pressure(congestion_df)
+        st.divider()
+        render_system_health(benchmark_df)
+        st.divider()
+        render_benchmark(benchmark_df)
 
     if auto_refresh:
         time.sleep(refresh_interval)

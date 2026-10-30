@@ -46,10 +46,21 @@ AIRPORT_TZ = {
     'BWI': 'America/New_York', 'SLC': 'America/Denver', 'MCO': 'America/New_York',
 }
 
-FEATURE_COLS = [
-    "DepDelay", "Distance", "DepHourUTC", "ArrHourUTC", "DayOfWeek",
-    "DestWindSpeed", "DestVisibility", "DestTemp", "LaneMeanDelay",
+BASE_COLS = ["DepDelay", "Distance", "DepHourUTC", "ArrHourUTC", "DayOfWeek", "LaneMeanDelay"]
+DEST_WX_V1 = ["DestWindSpeed", "DestVisibility", "DestTemp"]
+DEST_WX_CEIL = DEST_WX_V1 + ["DestCeiling"]
+ORIGIN_WX = ["OriginWindSpeed", "OriginVisibility", "OriginCeiling", "OriginTemp"]
+WEATHER_COLS = DEST_WX_CEIL + ORIGIN_WX
+
+# Final (served) model uses every feature; ablation steps add weather in stages.
+FEATURE_COLS = BASE_COLS + WEATHER_COLS
+ABLATION_SETS = [
+    ("gbt_no_weather", "lane + schedule only", BASE_COLS),
+    ("gbt_dest_wind_vis_temp", "+ destination wind, visibility, temp (v1)", BASE_COLS + DEST_WX_V1),
+    ("gbt_dest_plus_ceiling", "+ destination ceiling", BASE_COLS + DEST_WX_CEIL),
+    ("gbt_full_weather", "+ origin wind, visibility, ceiling, temp", FEATURE_COLS),
 ]
+WX_FILL = {"WindSpeed": 3.5, "Visibility": 9000.0, "Ceiling": 22000.0, "Temp": 15.0}
 LABEL_COL = "delta_delay"
 
 
@@ -197,6 +208,7 @@ def add_utc_timestamps(spark: SparkSession, df, airports: dict = None):
         .withColumn("DepHourUTC", F.hour("wheels_off_utc").cast(DoubleType()))
         .withColumn("ArrHourUTC", F.hour("sched_arr_utc").cast(DoubleType()))
         .withColumn("sched_arr_hour_utc", F.date_trunc("hour", F.col("sched_arr_utc")))
+        .withColumn("wheels_off_hour_utc", F.date_trunc("hour", F.col("wheels_off_utc")))
         .drop("_crs_dep_local", "_wo_local", "_crs_arr_local", "_orig_tz", "_dest_tz", "_wo_utc_raw", "_arr_utc_raw")
     )
     return df
@@ -229,6 +241,7 @@ def load_noaa_weather(spark: SparkSession, noaa_dir: str, years: list):
             F.col("WND"),
             F.col("VIS"),
             F.col("TMP"),
+            F.col("CIG"),
         )
         .withColumn("icao", F.regexp_extract(F.col("_filepath"), r"([A-Z0-9]{4})_\d+\.csv$", 1))
         .filter(F.col("icao") != "")
@@ -250,37 +263,86 @@ def load_noaa_weather(spark: SparkSession, noaa_dir: str, years: list):
             "temp_c",
             F.when(F.abs(F.col("_tmp_raw")) >= 9999, F.lit(None)).otherwise(F.col("_tmp_raw") / 10.0)
         )
-        .select("icao", "utc_hour", "wind_speed_mps", "visibility_m", "temp_c")
+        # CIG = "height_m,quality,method,cavok"; 99999 means no ceiling reported (clear sky)
+        .withColumn("_cig_raw", F.split(F.col("CIG"), ",").getItem(0).cast(DoubleType()))
+        .withColumn(
+            "ceiling_m",
+            F.when(F.col("_cig_raw").isNull() | (F.col("_cig_raw") >= 99999), F.lit(22000.0))
+             .otherwise(F.col("_cig_raw"))
+        )
+        .select("icao", "utc_hour", "wind_speed_mps", "visibility_m", "temp_c", "ceiling_m")
         .dropDuplicates(["icao", "utc_hour"])
     )
     return weather_df
 
 
 def join_weather(flights_df, weather_df):
-    """Broadcast left-join flights with static NOAA weather on (dest_icao, sched_arr_hour_utc)."""
-    flights_df = flights_df.withColumn("dest_icao", F.concat(F.lit("K"), F.col("Dest")))
-
-    weather_renamed = weather_df.select(
-        F.col("icao").alias("w_icao"),
-        F.col("utc_hour").alias("w_utc_hour"),
-        F.col("wind_speed_mps").alias("DestWindSpeed"),
-        F.col("visibility_m").alias("DestVisibility"),
-        F.col("temp_c").alias("DestTemp"),
+    """Broadcast left-join NOAA weather twice: destination at scheduled arrival hour,
+    origin at wheels-off hour (both are known when the prediction is made)."""
+    flights_df = (
+        flights_df
+        .withColumn("dest_icao", F.concat(F.lit("K"), F.col("Dest")))
+        .withColumn("origin_icao", F.concat(F.lit("K"), F.col("Origin")))
     )
 
-    joined = flights_df.join(
-        F.broadcast(weather_renamed),
-        (flights_df.dest_icao == weather_renamed.w_icao) &
-        (flights_df.sched_arr_hour_utc == weather_renamed.w_utc_hour),
-        how="left"
-    ).drop("w_icao", "w_utc_hour")
+    def renamed(prefix, key):
+        return weather_df.select(
+            F.col("icao").alias(f"{key}_icao"),
+            F.col("utc_hour").alias(f"{key}_hour"),
+            F.col("wind_speed_mps").alias(f"{prefix}WindSpeed"),
+            F.col("visibility_m").alias(f"{prefix}Visibility"),
+            F.col("temp_c").alias(f"{prefix}Temp"),
+            F.col("ceiling_m").alias(f"{prefix}Ceiling"),
+        )
 
-    joined = joined.fillna({
-        "DestWindSpeed": 3.5,
-        "DestVisibility": 9000.0,
-        "DestTemp": 15.0,
-    })
-    return joined
+    dest_w = renamed("Dest", "dw")
+    orig_w = renamed("Origin", "ow")
+    joined = (
+        flights_df
+        .join(F.broadcast(dest_w),
+              (flights_df.dest_icao == dest_w.dw_icao) &
+              (flights_df.sched_arr_hour_utc == dest_w.dw_hour), how="left")
+        .drop("dw_icao", "dw_hour")
+        .join(F.broadcast(orig_w),
+              (flights_df.origin_icao == orig_w.ow_icao) &
+              (flights_df.wheels_off_hour_utc == orig_w.ow_hour), how="left")
+        .drop("ow_icao", "ow_hour")
+    )
+    fills = {f"{side}{k}": v for side in ("Dest", "Origin") for k, v in WX_FILL.items()}
+    return joined.fillna(fills)
+
+
+def build_baseline_table(train_data):
+    """Typical delay by hub x local hour x weekday from the training years only.
+
+    Departures use the origin hub and scheduled local departure hour; arrivals use the
+    destination hub and scheduled local arrival hour. Local hour comes straight from the
+    BTS HHMM fields, so "Thursday evening" means evening at the hub.
+    """
+    def hhmm_hour(col):
+        return (F.floor(F.col(col).cast("int") / 100) % 24).cast("int")
+
+    dep = (
+        train_data
+        .withColumn("hour_local", hhmm_hour("CRSDepTime"))
+        .groupBy(F.col("Origin").alias("hub"), "hour_local", "DayOfWeek")
+        .agg(F.avg("DepDelay").alias("typical_dep_delay"),
+             F.expr("percentile_approx(DepDelay, 0.5)").alias("median_dep_delay"),
+             F.count("*").alias("dep_n"))
+    )
+    arr = (
+        train_data
+        .withColumn("hour_local", hhmm_hour("CRSArrTime"))
+        .groupBy(F.col("Dest").alias("hub"), "hour_local", "DayOfWeek")
+        .agg(F.avg("ArrDelay").alias("typical_arr_delay"),
+             F.expr("percentile_approx(ArrDelay, 0.5)").alias("median_arr_delay"),
+             F.count("*").alias("arr_n"))
+    )
+    return (
+        dep.join(arr, on=["hub", "hour_local", "DayOfWeek"], how="full_outer")
+        .withColumnRenamed("DayOfWeek", "day_of_week")
+        .fillna(0, subset=["dep_n", "arr_n"])
+    )
 
 
 def evaluate_model(model, test_df, label_col=LABEL_COL, model_name="Model"):
@@ -361,6 +423,16 @@ def main():
     lane_mean.write.mode("overwrite").parquet(lane_mean_path)
     print(f"[SAVE] Lane mean table -> {lane_mean_path}")
 
+    baseline_tbl = build_baseline_table(train_data).coalesce(1)
+    baseline_path = str(models_dir / "baseline_hub_hour_dow.parquet")
+    baseline_tbl.write.mode("overwrite").parquet(baseline_path)
+    baseline_pd = spark.read.parquet(baseline_path).toPandas().sort_values(
+        ["hub", "day_of_week", "hour_local"])
+    baseline_csv = models_dir / "baseline_hub_hour_dow.csv"
+    baseline_pd.round(3).to_csv(baseline_csv, index=False)
+    print(f"[SAVE] Baseline table ({len(baseline_pd):,} hub-hour-weekday cells, "
+          f"train years {train_years}) -> {baseline_path} + {baseline_csv.name}")
+
     lane_mean_cached = spark.read.parquet(lane_mean_path).cache()
     train_cols = FEATURE_COLS + [LABEL_COL]
     train_df = (
@@ -389,18 +461,40 @@ def main():
     print(f"\n[EVAL] Computing holdout baselines on {val_year}:")
     baseline_metrics = compute_baselines(val_df)
 
-    print("\n[TRAIN] Training GBTRegressor Pipeline...")
-    gbt = GBTRegressor(
-        featuresCol="features",
-        labelCol=LABEL_COL,
-        maxIter=cfg["training"]["gbt_max_iter"],
-        maxDepth=cfg["training"]["gbt_max_depth"],
-        seed=cfg["training"]["seed"],
-    )
-    gbt_pipeline = Pipeline(stages=[assembler, gbt])
-    t_gbt = time.time()
-    gbt_pipeline_model = gbt_pipeline.fit(train_df)
-    print(f"  GBT training time: {time.time()-t_gbt:.1f}s")
+    print("\n[ABLATION] Weather feature ablation (GBT, same hyperparameters):")
+    ablation_rows = [
+        {"model": "baseline_no_change", "description": "predict delta = 0", "n_features": 0,
+         "val_mae": baseline_metrics["b1_mae"], "val_rmse": baseline_metrics["b1_rmse"], "train_sec": 0.0},
+        {"model": "baseline_lane_mean", "description": "training lane mean delta", "n_features": 1,
+         "val_mae": baseline_metrics["b2_mae"], "val_rmse": baseline_metrics["b2_rmse"], "train_sec": 0.0},
+    ]
+    gbt_pipeline_model = None
+    for name, desc, cols in ABLATION_SETS:
+        asm = VectorAssembler(inputCols=cols, outputCol="features", handleInvalid="skip")
+        est = GBTRegressor(
+            featuresCol="features", labelCol=LABEL_COL,
+            maxIter=cfg["training"]["gbt_max_iter"], maxDepth=cfg["training"]["gbt_max_depth"],
+            seed=cfg["training"]["seed"],
+        )
+        t_a = time.time()
+        fitted = Pipeline(stages=[asm, est]).fit(train_df)
+        sec = time.time() - t_a
+        a_mae, a_rmse = evaluate_model(fitted, val_df, model_name=name)
+        ablation_rows.append({"model": name, "description": desc, "n_features": len(cols),
+                              "val_mae": a_mae, "val_rmse": a_rmse, "train_sec": round(sec, 1)})
+        if cols == FEATURE_COLS:
+            gbt_pipeline_model = fitted  # the full-weather model is the one served
+
+    import pandas as pd
+    ablation = pd.DataFrame(ablation_rows)
+    no_wx = ablation.loc[ablation["model"] == "gbt_no_weather", "val_mae"].iloc[0]
+    ablation["mae_gain_vs_no_weather_pct"] = ((no_wx - ablation["val_mae"]) / no_wx * 100).round(2)
+    ablation[["val_mae", "val_rmse"]] = ablation[["val_mae", "val_rmse"]].round(4)
+    ablation["train_years"] = ",".join(map(str, train_years))
+    ablation["val_year"] = val_year
+    ablation_path = models_dir / "ablation.csv"
+    ablation.to_csv(ablation_path, index=False)
+    print(f"[SAVE] Ablation table -> {ablation_path}")
 
     gbt_mae, gbt_rmse = evaluate_model(gbt_pipeline_model, val_df, model_name="GBT")
     gbt_model_path = str(models_dir / "gbt_pipeline_v1")

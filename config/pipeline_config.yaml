@@ -37,6 +37,11 @@ features:
     - DestWindSpeed
     - DestVisibility
     - DestTemp
+    - DestCeiling
+    - OriginWindSpeed
+    - OriginVisibility
+    - OriginCeiling
+    - OriginTemp
     - LaneMeanDelay
   categorical: []
   label: "delta_delay"

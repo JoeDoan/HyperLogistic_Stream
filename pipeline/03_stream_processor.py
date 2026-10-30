@@ -98,7 +98,7 @@ def build_spark(cores: int, shuffle_partitions: int, app_name: str = "HyperLogis
 
 def load_static_weather(spark: SparkSession, noaa_dir: str, year: int = 2024):
     """Load and materialize 2024 NOAA weather as a clean Parquet table for fast broadcast joins."""
-    cache_pq = f"/tmp/weather_static_{year}.parquet"
+    cache_pq = f"/tmp/weather_static_v2_{year}.parquet"  # v2: adds ceiling
     if not Path(cache_pq).exists():
         paths = glob.glob(os.path.join(noaa_dir, str(year), "*.csv"))
         if not paths:
@@ -111,7 +111,7 @@ def load_static_weather(spark: SparkSession, noaa_dir: str, year: int = 2024):
             .select(
                 F.input_file_name().alias("_fp"),
                 F.col("DATE").alias("raw_date"),
-                F.col("WND"), F.col("VIS"), F.col("TMP"),
+                F.col("WND"), F.col("VIS"), F.col("TMP"), F.col("CIG"),
             )
             .withColumn("icao", F.regexp_extract("_fp", r"([A-Z0-9]{4})_\d+\.csv$", 1))
             .filter(F.col("icao") != "")
@@ -133,9 +133,16 @@ def load_static_weather(spark: SparkSession, noaa_dir: str, year: int = 2024):
                 "DestTemp",
                 F.when(F.abs(F.col("_tmp_raw")) >= 9999, F.lit(None)).otherwise(F.col("_tmp_raw") / 10.0)
             )
-            .select("icao", "utc_hour", "DestWindSpeed", "DestVisibility", "DestTemp")
+            .withColumn("_cig_raw", F.split(F.col("CIG"), ",").getItem(0).cast(DoubleType()))
+            .withColumn(
+                "DestCeiling",
+                F.when(F.col("_cig_raw").isNull() | (F.col("_cig_raw") >= 99999), F.lit(22000.0))
+                 .otherwise(F.col("_cig_raw"))
+            )
+            .select("icao", "utc_hour", "DestWindSpeed", "DestVisibility", "DestTemp", "DestCeiling")
             .dropDuplicates(["icao", "utc_hour"])
-            .fillna({"DestWindSpeed": 3.5, "DestVisibility": 9000.0, "DestTemp": 15.0})
+            .fillna({"DestWindSpeed": 3.5, "DestVisibility": 9000.0, "DestTemp": 15.0,
+                     "DestCeiling": 22000.0})
         )
         raw_weather.coalesce(1).write.mode("overwrite").parquet(cache_pq)
 
@@ -157,6 +164,32 @@ def load_lane_mean(spark: SparkSession, models_dir: str):
     df = spark.read.parquet(lane_path).cache()
     print(f"[STREAM] Loaded {df.count():,} lane mean entries.")
     return df
+
+
+def apply_output_root(cfg: dict, output_root: str) -> dict:
+    """Redirect Bronze/Silver/Gold/checkpoints under one root (used by benchmark runs)."""
+    root = output_root if os.path.isabs(output_root) else str(PROJECT_ROOT / output_root)
+    paths = dict(cfg["paths"])
+    paths["bronze"] = os.path.join(root, "bronze")
+    paths["silver"] = os.path.join(root, "silver")
+    paths["gold_predictions"] = os.path.join(root, "gold", "predictions")
+    paths["gold_congestion"] = os.path.join(root, "gold", "hub_congestion")
+    paths["checkpoints"] = os.path.join(root, "checkpoints")
+    return {**cfg, "paths": paths}
+
+
+def reset_outputs(targets: list):
+    """Delete Medallion outputs and checkpoints so a replay starts clean."""
+    import shutil
+    for t in targets:
+        p = Path(t).resolve()
+        # Safety: only wipe directories that live inside the project
+        if PROJECT_ROOT not in p.parents:
+            print(f"[RESET] Refusing to delete outside project: {p}")
+            continue
+        if p.exists():
+            shutil.rmtree(p, ignore_errors=True)
+            print(f"[RESET] Removed {p}")
 
 
 class BatchMetricsLogger:
@@ -224,6 +257,8 @@ def run_streaming_pipeline(
     trigger_interval_sec: int,
     metrics_logger: BatchMetricsLogger,
     test_mode: bool = False,
+    reset: bool = False,
+    dedupe: bool = True,
 ):
     noaa_dir = resolve_path(cfg["paths"], "raw_noaa")
     models_dir = resolve_path(cfg["paths"], "models")
@@ -232,7 +267,9 @@ def run_streaming_pipeline(
     gold_path = resolve_path(cfg["paths"], "gold_predictions")
     gold_agg_path = resolve_path(cfg["paths"], "gold_congestion")
     checkpoint_root = os.path.join(resolve_path(cfg["paths"], "checkpoints"), metrics_logger.config_label)
-    if test_mode and os.path.exists(checkpoint_root):
+    if reset:
+        reset_outputs([bronze_path, silver_path, gold_path, gold_agg_path, checkpoint_root])
+    elif test_mode and os.path.exists(checkpoint_root):
         import shutil
         shutil.rmtree(checkpoint_root, ignore_errors=True)
     topic = cfg["kafka"]["topic"]
@@ -287,6 +324,8 @@ def run_streaming_pipeline(
         )
         .withColumn("sched_arr_hour_utc", F.date_trunc("hour", "crs_arr_ts"))
         .withColumn("dest_icao", F.concat(F.lit("K"), F.col("dest")))
+        .withColumn("origin_icao", F.concat(F.lit("K"), F.col("origin")))
+        .withColumn("wheels_off_hour_utc", F.date_trunc("hour", "wheels_off_ts"))
         .withColumn("DepDelay", F.col("dep_delay").cast(DoubleType()))
         .withColumn("Distance", F.col("distance").cast(DoubleType()))
         .withColumn("DepHourUTC", F.hour("wheels_off_ts").cast(DoubleType()))
@@ -301,6 +340,15 @@ def run_streaming_pipeline(
         F.col("DestWindSpeed"),
         F.col("DestVisibility"),
         F.col("DestTemp"),
+        F.col("DestCeiling"),
+    )
+    origin_renamed = weather_static.select(
+        F.col("icao").alias("o_icao"),
+        F.col("utc_hour").alias("o_utc_hour"),
+        F.col("DestWindSpeed").alias("OriginWindSpeed"),
+        F.col("DestVisibility").alias("OriginVisibility"),
+        F.col("DestTemp").alias("OriginTemp"),
+        F.col("DestCeiling").alias("OriginCeiling"),
     )
 
     lane_renamed = lane_mean_static.select(
@@ -319,13 +367,24 @@ def run_streaming_pipeline(
         )
         .drop("w_icao", "w_utc_hour")
         .join(
+            F.broadcast(origin_renamed),
+            (parsed_stream.origin_icao == origin_renamed.o_icao) &
+            (parsed_stream.wheels_off_hour_utc == origin_renamed.o_utc_hour),
+            how="left"
+        )
+        .drop("o_icao", "o_utc_hour")
+        .join(
             F.broadcast(lane_renamed),
             (parsed_stream.origin == lane_renamed.l_origin) &
             (parsed_stream.dest == lane_renamed.l_dest),
             how="left"
         )
         .drop("l_origin", "l_dest")
-        .fillna({"DestWindSpeed": 3.5, "DestVisibility": 9000.0, "DestTemp": 15.0, "LaneMeanDelay": 0.0})
+        .fillna({
+            "DestWindSpeed": 3.5, "DestVisibility": 9000.0, "DestTemp": 15.0, "DestCeiling": 22000.0,
+            "OriginWindSpeed": 3.5, "OriginVisibility": 9000.0, "OriginTemp": 15.0,
+            "OriginCeiling": 22000.0, "LaneMeanDelay": 0.0,
+        })
     )
 
     if gbt_model:
@@ -357,51 +416,78 @@ def run_streaming_pipeline(
         "emit_epoch_ms", "emit_ts",
         "wheels_off_ts", "crs_arr_ts", "sched_arr_hour_utc", "dest_icao",
         "DepDelay", "Distance", "DepHourUTC", "ArrHourUTC", "DayOfWeek",
-        "DestWindSpeed", "DestVisibility", "DestTemp", "LaneMeanDelay", "enrich_date",
+        "DestWindSpeed", "DestVisibility", "DestTemp", "DestCeiling",
+        "OriginWindSpeed", "OriginVisibility", "OriginTemp", "OriginCeiling", "LaneMeanDelay", "enrich_date",
     ]
     gold_cols = [
         "flight_id", "carrier", "origin", "dest", "tail_number",
         "wheels_off_ts", "crs_arr_ts", "predicted_eta_utc",
         F.col("DepDelay").alias("dep_delay"), "predicted_delta_delay", "is_high_risk",
-        "DestWindSpeed", "DestVisibility", "DestTemp",
+        "DestWindSpeed", "DestVisibility", "DestTemp", "DestCeiling",
+        "OriginWindSpeed", "OriginVisibility", "OriginTemp", "OriginCeiling",
         "LaneMeanDelay", "gold_date",
     ]
+
+    def dedupe_batch(df):
+        """Drop repeated flight_ids within the batch and against rows already in Gold."""
+        df = df.dropDuplicates(["flight_id"])
+        if Path(gold_path).exists():
+            try:
+                seen = spark.read.parquet(gold_path).select("flight_id").distinct()
+                df = df.join(seen, on="flight_id", how="left_anti")
+            except Exception as exc:  # Gold unreadable mid-write: keep batch-level dedupe only
+                print(f"[STREAM] Gold dedupe skipped: {exc}")
+        return df
 
     def unified_foreach_batch(df, batch_id):
         t_start = time.time()
         df.persist()
+        write_df = None
         try:
             emit_rows = df.select("emit_epoch_ms").collect()
             count = len(emit_rows)
             if count > 0:
+                out = df
+                if dedupe:
+                    # Full count() materializes the cache before Gold is written, so the
+                    # anti-join is never re-evaluated against this batch's own output.
+                    write_df = dedupe_batch(df).persist()
+                    kept = write_df.count()
+                    if kept == 0:
+                        print(f"  [Batch {batch_id:4d}] all {count:,} rows already in Gold, skipped")
+                        metrics_logger.log_batch(batch_id, count, t_start, time.time())
+                        return
+                    if kept < count:
+                        print(f"  [Batch {batch_id:4d}] dropped {count - kept:,} repeated rows")
+                    out = write_df
                 emit_ts_list = [
                     row["emit_epoch_ms"]
                     for row in emit_rows
                     if row["emit_epoch_ms"]
                 ]
                 (
-                    df.select("kafka_offset", "kafka_partition", "kafka_ts", "raw_json", "ingest_date")
+                    out.select("kafka_offset", "kafka_partition", "kafka_ts", "raw_json", "ingest_date")
                     .coalesce(1)
                     .write.mode("append")
                     .partitionBy("ingest_date")
                     .parquet(bronze_path)
                 )
                 (
-                    df.select(*silver_cols)
+                    out.select(*silver_cols)
                     .coalesce(1)
                     .write.mode("append")
                     .partitionBy("enrich_date")
                     .parquet(silver_path)
                 )
                 (
-                    df.select(*gold_cols)
+                    out.select(*gold_cols)
                     .coalesce(1)
                     .write.mode("append")
                     .partitionBy("gold_date")
                     .parquet(gold_path)
                 )
                 (
-                    df.groupBy(
+                    out.groupBy(
                         F.window("crs_arr_ts", window_dur, slide_dur).alias("arrival_window"),
                         F.col("dest"),
                     )
@@ -425,6 +511,8 @@ def run_streaming_pipeline(
                     emit_timestamps=emit_ts_list
                 )
         finally:
+            if write_df is not None:
+                write_df.unpersist()
             df.unpersist()
 
     stream_query = (
@@ -472,9 +560,18 @@ def main():
                         help="Stop after 4 batches or 60s (for quick validation)")
     parser.add_argument("--benchmark-label", type=str, default=None,
                         help="Label for benchmark metrics output file")
+    parser.add_argument("--reset", action="store_true",
+                        help="Delete Bronze/Silver/Gold/checkpoints before starting (clean replay)")
+    parser.add_argument("--output-root", type=str, default=None,
+                        help="Write Bronze/Silver/Gold/checkpoints under this directory instead of "
+                             "the config paths (keeps benchmark runs out of the dashboard's Gold)")
+    parser.add_argument("--no-dedupe", action="store_true",
+                        help="Skip flight_id dedupe (benchmarks replay the same flights in a loop)")
     args = parser.parse_args()
 
     cfg = load_config(args.config)
+    if args.output_root:
+        cfg = apply_output_root(cfg, args.output_root)
     bootstrap_servers = args.bootstrap or cfg["kafka"]["bootstrap_servers"]
 
     config_label = args.benchmark_label or (
@@ -505,6 +602,8 @@ def main():
         trigger_interval_sec=args.trigger_interval,
         metrics_logger=metrics_logger,
         test_mode=args.test,
+        reset=args.reset,
+        dedupe=not args.no_dedupe,
     )
 
     spark.stop()
