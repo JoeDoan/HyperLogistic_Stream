@@ -193,6 +193,18 @@ def reset_outputs(targets: list):
             print(f"[RESET] Removed {p}")
 
 
+def dedupe_batch(spark, df, gold_path: str):
+    """Drop repeated flight_ids within the batch and against rows already in Gold."""
+    df = df.dropDuplicates(["flight_id"])
+    if Path(gold_path).exists():
+        try:
+            seen = spark.read.parquet(gold_path).select("flight_id").distinct()
+            df = df.join(seen, on="flight_id", how="left_anti")
+        except Exception as exc:  # Gold unreadable mid-write: keep batch-level dedupe only
+            print(f"[STREAM] Gold dedupe skipped: {exc}")
+    return df
+
+
 class BatchMetricsLogger:
     """Collects per-batch latency and throughput for RQ2 benchmarks."""
 
@@ -430,17 +442,6 @@ def run_streaming_pipeline(
         "LaneMeanDelay", "gold_date",
     ]
 
-    def dedupe_batch(df):
-        """Drop repeated flight_ids within the batch and against rows already in Gold."""
-        df = df.dropDuplicates(["flight_id"])
-        if Path(gold_path).exists():
-            try:
-                seen = spark.read.parquet(gold_path).select("flight_id").distinct()
-                df = df.join(seen, on="flight_id", how="left_anti")
-            except Exception as exc:  # Gold unreadable mid-write: keep batch-level dedupe only
-                print(f"[STREAM] Gold dedupe skipped: {exc}")
-        return df
-
     def unified_foreach_batch(df, batch_id):
         t_start = time.time()
         df.persist()
@@ -455,7 +456,7 @@ def run_streaming_pipeline(
                 if dedupe:
                     # Full count() materializes the cache before Gold is written, so the
                     # anti-join is never re-evaluated against this batch's own output.
-                    write_df = dedupe_batch(df).persist()
+                    write_df = dedupe_batch(spark, df, gold_path).persist()
                     kept = write_df.count()
                     if kept == 0:
                         print(f"  [Batch {batch_id:4d}] all {count:,} rows already in Gold, skipped")
