@@ -2,122 +2,192 @@
 
 **Real-Time Hub-to-Hub Logistics ETA Prediction with Kafka and Spark Structured Streaming**
 
-* **Course:** COMP-SCI 5540 Principles of Big Data Management (Fall 2026)  
-* **Institution:** School of Science and Engineering, University of Missouri-Kansas City (UMKC)  
-* **Instructor:** Dr. Md Yusuf Sarwar Uddin  
-* **Authors:** Tony Nguyen (`tmnc62@umsystem.edu`) & Joe Doan (`jdbc6@umsystem.edu`)  
+| | |
+|---|---|
+| **Course** | COMP-SCI 5540 Principles of Big Data Management (Fall 2026) |
+| **Institution** | School of Science and Engineering, University of Missouri-Kansas City (UMKC) |
+| **Instructor** | Dr. Md Yusuf Sarwar Uddin |
+| **Authors** | Tony Nguyen (`tmnc62@umsystem.edu`) & Joe Doan (`jdbc6@umsystem.edu`) |
+
+## Contents
+
+1. [Project Overview](#1-project-overview)
+2. [Quick Start](#2-quick-start)
+3. [Data Setup](#3-data-setup-required-for-batch-and-replay)
+4. [Running the Pipeline](#4-running-the-pipeline)
+5. [Repository Structure](#5-repository-structure)
+6. [Exploratory Data Analysis](#6-exploratory-data-analysis)
+7. [Research Questions](#7-research-questions--evaluation-matrix)
+8. [Troubleshooting](#8-troubleshooting)
+9. [License & Academic Integrity](#9-license--academic-integrity)
 
 ---
 
 ## 1. Project Overview
 
-In middle-mile freight logistics, unexpected transit delays create severe scheduling bottlenecks and dock-door inefficiencies across downstream distribution hubs. **HyperLogistics-Stream** is an end-to-end distributed big data processing pipeline designed to ingest, clean, enrich, and predict arrival delay updates ($\Delta\text{delay} = \text{ArrDelay} - \text{DepDelay}$) and estimated times of arrival (ETA) in real time.
+In middle-mile freight logistics, unexpected transit delays create scheduling bottlenecks and dock-door inefficiencies across downstream hubs. **HyperLogistics-Stream** is an end-to-end big data pipeline that ingests, cleans, enriches, and predicts arrival delay changes ($\Delta\text{delay} = \text{ArrDelay} - \text{DepDelay}$) and ETAs in real time.
 
-### 4-Tier Big Data Architecture
-1. **Ingestion Layer:** Apache Kafka replays high-velocity trip events in chronological `WheelsOff` order at controlled throughput rates (1k, 5k, 20k events/sec).
-2. **Storage Layer (Medallion Architecture):** HDFS/S3-backed Parquet storage partitioned across **Bronze** (raw streaming dumps), **Silver** (cleaned and weather-joined records), and **Gold** (scored dynamic ETAs and hub arrival rollups).
-3. **Processing & ML Layer:** PySpark Structured Streaming performs stateful window aggregations and stream-static broadcast joins against NOAA surface weather stations; Spark MLlib (`GBTRegressor` and `RandomForestRegressor`) scores inbound trips dynamically.
-4. **Serving & Dashboard Layer:** FastAPI exposes low-latency REST endpoints to query hub congestion, consumed by an interactive Streamlit live operations dashboard.
+> Flights are used as a **public proxy** for hub-to-hub freight movement.
+
+### Architecture
+
+1. **Ingestion:** Apache Kafka replays historical trips in chronological `WheelsOff` order at controlled rates (1k, 5k, 20k events/sec). A **live producer** also publishes OpenSky aircraft positions, FAA NAS airport status, and NWS weather.
+2. **Storage (Medallion):** Parquet tables in **Bronze** (raw), **Silver** (cleaned, weather-joined), and **Gold** (scored ETAs and hub rollups).
+3. **Processing & ML:** PySpark Structured Streaming with windowed aggregations and stream-static joins against NOAA weather; Spark MLlib (`GBTRegressor`, `RandomForestRegressor`) scores inbound trips.
+4. **Serving:** FastAPI REST endpoints and a Streamlit dashboard (**Live Radar** and **Replay & Benchmark** tabs).
 
 ---
 
-## 2. Prerequisites & Data Setup (REQUIRED)
+## 2. Quick Start
+
+Runs the live radar and dashboard. It does **not** need the 11 GB dataset. If no pipeline output exists yet, the dashboard falls back to synthetic demo data.
+
+**Prerequisites:** Python 3.10+, Java 11/17, Apache Spark 3.5+, Docker Desktop.
+
+```bash
+# 1. Clone and install
+git clone <your-repo-url> HyperLogistic_Stream
+cd HyperLogistic_Stream
+pip install -r requirements.txt
+
+# 2. (Optional) copy environment template
+cp .env.example .env            # Windows: copy .env.example .env
+
+# 3. Start Kafka (Zookeeper + broker + topic)
+docker compose up -d
+
+# 4. Terminal A - live feeds -> Kafka (add --record to save a session for replay)
+python live/live_producer.py --record
+
+# 5. Terminal B - Spark live processor -> Gold tables
+python pipeline/04_live_processor.py
+
+# 6. Terminal C - dashboard
+streamlit run dashboard/app.py
+```
+
+Open **http://localhost:8501**.
+
+| Service | URL |
+|---|---|
+| Dashboard | http://localhost:8501 |
+| API docs (if started) | http://localhost:8000/docs |
+| Spark UI | http://localhost:4040 |
+| Kafka (external) | `localhost:9094` |
+
+**Dashboard only (no Kafka/Spark):** `streamlit run dashboard/app.py` shows demo data.
+**Offline check of the feeds:** `python live/live_producer.py --dry-run --once`
+
+---
+
+## 3. Data Setup (required for batch and replay)
 
 > [!IMPORTANT]
-> The `data/` directory contains **~11 GB** of raw records and is **strictly excluded from this Git repository** via `.gitignore`. You **must run the data download scripts first** before attempting to execute any exploratory analysis, notebooks, or streaming jobs.
+> `data/` holds **~11 GB** of raw records and is **excluded from Git** via `.gitignore`. Download it before running training, replay, or the EDA.
 
-### Step 1: Install Python Dependencies
-Ensure Python 3.10+ is installed, then set up required packages:
 ```bash
-pip install pandas numpy matplotlib seaborn tqdm nbformat pyarrow
-```
-*(For PySpark and streaming components, ensure Java 11/17 and Apache Spark 3.5+ are configured on your system).*
+# BTS On-Time Flight Records 2022-2024 (~9.8 GB) -> data/raw/bts/
+python scripts/download_bts.py --years 2022 2023 2024 --extract
 
-### Step 2: Download Raw Datasets (~11 GB Total)
-
-#### A. Download BTS On-Time Flight Records (2022–2024, ~9.8 GB)
-Downloads all 36 monthly archives and extracts the raw CSVs into `data/raw/bts/`:
-```bash
-python3 scripts/download_bts.py --years 2022 2023 2024 --extract
+# NOAA ISD hourly weather, top 40 hubs (~911 MB) -> data/raw/noaa/
+python scripts/download_noaa.py --years 2022 2023 2024
 ```
-* **2022–2023 (~6.5 GB):** Offline training partition for Spark MLlib models and historical lane delay baselines.
-* **2024 (~3.3 GB):** Streaming replay partition for Kafka real-time ingestion and evaluation.
 
-#### B. Download NOAA ISD Hourly Weather Data (2022–2024, ~911 MB)
-Fetches hourly surface weather (wind speed, visibility, temperature) for top 40 US logistics and air cargo hubs into `data/raw/noaa/`:
-```bash
-python3 scripts/download_noaa.py --years 2022 2023 2024
-```
+* **2022-2023 (~6.5 GB):** training partition and historical lane baselines.
+* **2024 (~3.3 GB):** streaming replay partition.
 
 ---
 
-## 3. Repository Structure
+## 4. Running the Pipeline
 
-```
-project_BigData/
-├── .gitignore                                 # Ignores data/, Parquet, checkpoints, and OS artifacts
-├── README.md                                  # Project overview and setup instructions
-├── PIPELINE_SPECIFICATION.md                  # Comprehensive end-to-end architecture specification
-├── CS5540_HyperLogistics_Project_Summary.md    # Project overview, course rubric & milestones (VN)
-├── project_proposal_big_data.tex              # 1-page academic project proposal (LaTeX source)
-├── project_proposal_big_data_Tony_Joe.pdf     # Compiled proposal document
-├── Hyperlogistics_Stream_Tony_Joe.pptx        # Presentation slide deck
-├── proposal_preview.png                       # Visual overview preview
-├── scripts/
-│   ├── download_bts.py                        # BTS multi-year bulk downloader with auto-extract
-│   ├── download_noaa.py                       # NOAA ISD AWS S3 weather downloader & station resolver
-│   ├── run_eda.py                             # Data cleaning, UTC normalization & figure generation
-│   └── build_notebook.py                      # Programmatic builder for interactive EDA notebook
-├── notebooks/
-│   └── 01_data_cleaning_and_eda.ipynb         # Interactive Jupyter Notebook for data inspection & EDA
-└── reports/
-    └── figures/                               # Publication-ready analytical plots
-        ├── fig1_delay_distributions.png       # Flight departure vs. arrival delay skew
-        ├── fig2_wind_speed_vs_delay.png       # Impact of destination surface wind on delay
-        ├── fig3_visibility_vs_delay.png       # Flight delay progression under degraded visibility
-        ├── fig4_hourly_departure_patterns.png # Diurnal traffic congestion volume by UTC hour
-        └── fig5_hub_congestion_comparison.png  # Average delay ranking across key cargo & passenger hubs
-```
+Run from the project root. Start Kafka first (`docker compose up -d`).
+
+| Step | Command | Purpose |
+|---|---|---|
+| 1. Train | `python pipeline/01_batch_train.py` | Train models on 2022-2023 (`--skip-rf` to save time) |
+| 2. Replay producer | `python pipeline/02_kafka_producer.py --rate 1000` | Replay 2024 trips into Kafka (`--limit`, `--loop`) |
+| 3. Replay processor | `python pipeline/03_stream_processor.py` | Score and write Gold tables (`--reset`, `--test`, `--cores`, `--shuffle-partitions`) |
+| 4. Live producer | `python live/live_producer.py --record` | FAA + weather + OpenSky to Kafka (`--no-opensky`, `--dry-run`, `--once`) |
+| 5. Live processor | `python pipeline/04_live_processor.py` | Live Spark stream (`--reset`, `--test`) |
+| 6. API | `uvicorn api.main:app --port 8000` | REST endpoints for hub congestion |
+| 7. Dashboard | `streamlit run dashboard/app.py` | Live Radar and Replay & Benchmark |
+| 8. Benchmark | `python benchmark/run_benchmark.py --quick` | RQ2 grid (`--quick` = reduced grid) |
+| 9. Analyze | `python benchmark/analyze_results.py` | Benchmark charts and summary |
+
+Defaults live in [`config/pipeline_config.yaml`](config/pipeline_config.yaml). Override with `--config <path>` or `HYPERLOGISTICS_CONFIG`.
 
 ---
 
-## 4. Running the EDA & Generating Figures
+## 5. Repository Structure
 
-Once the raw datasets are downloaded, you can execute the cleaning and exploratory pipeline:
-
-```bash
-# Run the complete data cleaning and figure generation pipeline
-python3 scripts/run_eda.py
+```
+HyperLogistic_Stream/
+├── README.md
+├── requirements.txt            # Python dependencies
+├── docker-compose.yml          # Zookeeper + Kafka + topic init
+├── .env.example                # Environment variable template
+├── config/                     # pipeline_config.yaml
+├── scripts/                    # download_bts.py, download_noaa.py, run_eda.py,
+│                               # build_notebook.py, setup_colab.sh
+├── pipeline/
+│   ├── 01_batch_train.py       # Spark MLlib training
+│   ├── 02_kafka_producer.py    # Historical replay producer
+│   ├── 03_stream_processor.py  # Structured Streaming -> Gold
+│   └── 04_live_processor.py    # Live-topic Spark processor
+├── live/                       # live_producer.py, fetch_opensky.py,
+│                               # fetch_faa_nas.py, fetch_nws_weather.py
+├── api/main.py                 # FastAPI service
+├── dashboard/                  # app.py, live_radar.py (Streamlit)
+├── benchmark/                  # run_benchmark.py, analyze_results.py, results/
+├── notebooks/                  # EDA and Colab pipeline notebooks
+├── models/                     # Trained models and metrics
+├── reports/figures/            # EDA plots
+├── docs/                       # Midterm/ and Phase 2/ (plans, run steps)
+├── PIPELINE_SPECIFICATION.md   # Full architecture specification
+└── CS5540_HyperLogistics_Project_Summary.md
 ```
 
-This script:
-1. Filters cancelled and diverted trips.
-2. Aligns airport local timestamps to universal UTC datetimes using IANA timezone lookups.
-3. Cleans compound NOAA ISD weather strings (WND, VIS, TMP).
-4. Simulates a stream-static join between airborne flights and destination weather.
-5. Saves high-resolution visualization charts to `reports/figures/` and a validated Bronze dataset sample to `data/bronze/sample_cleaned_joined.parquet`.
+`data/` and `checkpoints/` are generated locally and ignored by Git.
 
-You can also explore the analysis interactively inside Jupyter:
+---
+
+## 6. Exploratory Data Analysis
+
 ```bash
+python scripts/run_eda.py
 jupyter notebook notebooks/01_data_cleaning_and_eda.ipynb
 ```
 
----
-
-## 5. Research Questions & Evaluation Matrix
-
-* **RQ1 (Model Accuracy):** Does dynamic ETA prediction conditioning on departure delay, real-time arrival weather, and rolling lane congestion outperform:
-  1. *Baseline 1:* Delay unchanged ($\Delta\text{delay} = 0$).
-  2. *Baseline 2:* 30-day historical origin-destination lane mean.
-* **RQ2 (System Scalability & Benchmarks):** Measure end-to-end p50/p95 latency, batch processing time, and throughput (records/sec) across variations in:
-  * Spark CPU cores ($2, 4, 8$)
-  * Shuffle partitions ($8, 64, 200$)
-  * Kafka ingestion rates ($1\text{k}, 5\text{k}, 20\text{k}\text{ events/sec}$)
-  * Micro-batch trigger offsets (`maxOffsetsPerTrigger`).
-* **RQ3 (Operational Dispatcher Interface):** Serve live aggregated predictions to operations staff through FastAPI and a live interactive Streamlit dashboard.
+The EDA script filters cancelled/diverted trips, converts local times to UTC, cleans NOAA `WND`/`VIS`/`TMP` fields, simulates the stream-static weather join, and writes figures to `reports/figures/` plus a Bronze sample to `data/bronze/sample_cleaned_joined.parquet`.
 
 ---
 
-## 6. License & Academic Integrity
+## 7. Research Questions & Evaluation Matrix
 
-This project is developed as part of academic coursework for COMP-SCI 5540 Principles of Big Data Management at UMKC. All code and reports follow institutional honor codes and academic integrity standards.
+* **RQ1 (Model Accuracy):** Does ETA prediction using departure delay, arrival weather, and rolling lane congestion beat:
+  1. *Baseline 1:* delay unchanged ($\Delta\text{delay} = 0$)
+  2. *Baseline 2:* 30-day historical origin-destination lane mean
+* **RQ2 (Scalability):** Measure p50/p95 latency, batch time, and throughput across:
+  * Spark cores (2, 4, 8)
+  * Shuffle partitions (8, 64, 200)
+  * Kafka rates (1k, 5k, 20k events/sec)
+  * `maxOffsetsPerTrigger`
+* **RQ3 (Operational Interface):** Serve live predictions through FastAPI and Streamlit.
+
+---
+
+## 8. Troubleshooting
+
+| Symptom | Fix |
+|---|---|
+| Dashboard shows "synthetic demo data" | Gold tables are empty. Start the producer and processor, then wait for a micro-batch |
+| Kafka connection refused | Run `docker compose up -d`. Use `localhost:9094` from the host |
+| OpenSky rate-limit warnings | Run with `--no-opensky`. FAA + weather carry the story |
+| `StreamlitInvalidWidthError` | Use `width='stretch'` (not `'container'`) in `st.plotly_chart` |
+| Replay shows repeated rows | Rerun the processor with `--reset` |
+
+---
+
+## 9. License & Academic Integrity
+
+Developed as coursework for COMP-SCI 5540 Principles of Big Data Management at UMKC. All code and reports follow institutional honor codes and academic integrity standards.
