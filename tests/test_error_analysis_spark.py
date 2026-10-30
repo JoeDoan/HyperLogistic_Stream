@@ -19,7 +19,9 @@ def spark():
     from pyspark.sql import SparkSession
     try:
         s = (SparkSession.builder.master("local[1]").appName("err-test")
-             .config("spark.ui.enabled", "false").config("spark.sql.shuffle.partitions", "1").getOrCreate())
+             .config("spark.ui.enabled", "false")
+             .config("spark.sql.session.timeZone", "UTC")
+             .config("spark.sql.shuffle.partitions", "1").getOrCreate())
     except Exception as exc:
         pytest.skip(f"Spark unavailable: {exc}")
     yield s

@@ -1,5 +1,8 @@
 """Output-root redirection and the reset safety check in the stream processor."""
+import shutil
 from pathlib import Path
+
+import pytest
 
 CFG = {
     "paths": {
@@ -46,10 +49,53 @@ def test_reset_refuses_outside_project(stream_processor, tmp_path):
     victim = tmp_path / "keep"
     victim.mkdir()
     (victim / "f.txt").write_text("x")
-    stream_processor.reset_outputs([str(victim)])
+    with pytest.raises(ValueError, match="Refusing unsafe or unauthorized reset target"):
+        stream_processor.reset_outputs([str(victim)])
     assert (victim / "f.txt").exists()
 
 
 def test_reset_refuses_project_root_itself(stream_processor):
-    stream_processor.reset_outputs([str(stream_processor.PROJECT_ROOT)])
+    with pytest.raises(ValueError, match="Refusing unsafe or unauthorized reset target"):
+        stream_processor.reset_outputs([str(stream_processor.PROJECT_ROOT)])
     assert (stream_processor.PROJECT_ROOT / "pipeline").exists()
+
+
+def test_reset_allows_explicit_external_configured_paths(stream_processor, tmp_path):
+    colab_gold = tmp_path / "drive" / "MyDrive" / "HyperLogistics" / "gold"
+    colab_ckpt = tmp_path / "checkpoints" / "c4_sp8_mo5000"
+    (colab_gold / "part").mkdir(parents=True)
+    (colab_gold / "part" / "f.parquet").write_text("x")
+    colab_ckpt.mkdir(parents=True)
+    (colab_ckpt / "offsets").write_text("1")
+
+    targets = [str(colab_gold), str(colab_ckpt)]
+    stream_processor.reset_outputs(targets, allowed_roots=targets)
+
+    assert not colab_gold.exists()
+    assert not colab_ckpt.exists()
+
+
+def test_reset_refuses_shallow_root_even_if_allowed(stream_processor):
+    with pytest.raises(ValueError, match="Refusing unsafe or unauthorized reset target"):
+        stream_processor.reset_outputs([str(Path("/tmp"))], allowed_roots=[str(Path("/tmp"))])
+
+    with pytest.raises(ValueError, match="Refusing unsafe or unauthorized reset target"):
+        stream_processor.reset_outputs(
+            [str(stream_processor.PROJECT_ROOT)],
+            allowed_roots=[str(stream_processor.PROJECT_ROOT)],
+        )
+    assert (stream_processor.PROJECT_ROOT / "pipeline").exists()
+
+
+def test_reset_validates_all_targets_before_deleting_any(stream_processor, tmp_path):
+    valid_inside = stream_processor.PROJECT_ROOT / "data" / "_pytest_atomic_reset_tmp"
+    valid_inside.mkdir(parents=True, exist_ok=True)
+    (valid_inside / "f.parquet").write_text("x")
+    unauthorized_outside = tmp_path / "unauthorized"
+    unauthorized_outside.mkdir()
+    try:
+        with pytest.raises(ValueError, match="Refusing unsafe or unauthorized reset target"):
+            stream_processor.reset_outputs([str(valid_inside), str(unauthorized_outside)])
+        assert (valid_inside / "f.parquet").exists()
+    finally:
+        shutil.rmtree(valid_inside, ignore_errors=True)
