@@ -539,6 +539,107 @@ def benchmark_headline(agg: pd.DataFrame) -> str:
     return " ".join(parts)
 
 
+MODELS_DIR = PROJECT_ROOT / "models"
+FEATURE_GROUPS = {
+    "Departure delay": ["DepDelay"],
+    "Schedule & time": ["DepHourUTC", "ArrHourUTC", "DayOfWeek"],
+    "Lane & distance": ["LaneMeanDelay", "Distance"],
+    "Destination weather": ["DestWindSpeed", "DestVisibility", "DestTemp", "DestCeiling"],
+    "Origin weather": ["OriginWindSpeed", "OriginVisibility", "OriginCeiling", "OriginTemp"],
+}
+
+
+def feature_group_importance(importances: dict) -> pd.DataFrame:
+    """Sum GBT feature importances into readable groups (unknown features go to 'Other')."""
+    known = {f: g for g, fs in FEATURE_GROUPS.items() for f in fs}
+    out = {}
+    for feat, val in importances.items():
+        g = known.get(feat, "Other")
+        out[g] = out.get(g, 0.0) + float(val)
+    return (pd.DataFrame({"group": list(out), "importance": list(out.values())})
+            .sort_values("importance", ascending=False, ignore_index=True))
+
+
+def hub_error_gain(hub_df: pd.DataFrame) -> pd.DataFrame:
+    """Per hub: GBT MAE improvement over the lane-mean baseline, in minutes and percent."""
+    d = hub_df.copy()
+    d["gain_min"] = d["mae_lane_mean"] - d["mae_gbt"]
+    d["gain_pct"] = 100 * d["gain_min"] / d["mae_lane_mean"]
+    return d.sort_values("mae_gbt", ascending=False, ignore_index=True)
+
+
+def error_so_what(hub_df: pd.DataFrame, bucket_df: pd.DataFrame) -> str:
+    """One sentence on where the model is weakest, from the error tables."""
+    parts = []
+    if not hub_df.empty:
+        worst = hub_df.loc[hub_df["mae_gbt"].idxmax()]
+        best = hub_df.loc[hub_df["mae_gbt"].idxmin()]
+        parts.append(f"Largest error is at {worst['hub']} (MAE {worst['mae_gbt']:.1f} min); "
+                     f"smallest at {best['hub']} ({best['mae_gbt']:.1f} min).")
+    if not bucket_df.empty:
+        tail = bucket_df[bucket_df["bucket"] == "late >15 min"]
+        if not tail.empty and tail["bias_gbt"].iloc[0] < 0:
+            parts.append(f"Flights that turn out >15 min late are under-predicted by "
+                         f"{abs(tail['bias_gbt'].iloc[0]):.1f} min on average, so big delays are underestimated.")
+    return " ".join(parts) or "No error tables yet."
+
+
+def _read_model_csv(name: str) -> pd.DataFrame:
+    path = MODELS_DIR / name
+    return pd.read_csv(path) if path.exists() else pd.DataFrame()
+
+
+def render_model_insights():
+    """Feature importance and error analysis from the batch-training outputs."""
+    st.subheader("Model Insights")
+    metrics_path = MODELS_DIR / "training_metrics.json"
+    if metrics_path.exists():
+        m = json.loads(metrics_path.read_text())
+        grp = feature_group_importance(m.get("gbt_feature_importances", {}))
+        fig = px.bar(grp, x="importance", y="group", orientation="h",
+                     labels={"importance": "Share of GBT split importance", "group": ""})
+        fig.update_layout(height=280, paper_bgcolor="rgba(0,0,0,0)", yaxis_autorange="reversed")
+        st.plotly_chart(fig, use_container_width=True)
+        st.caption("Split-based importance favours continuous features, so it overstates weather. "
+                   "The ablation in EVALUATION.md (weather adds about 1% MAE gain) is the reliable measure.")
+    else:
+        st.info("No training_metrics.json yet. Run `pipeline/01_batch_train.py`.")
+
+    hub, hour = _read_model_csv("error_by_hub.csv"), _read_model_csv("error_by_hour.csv")
+    month, bucket = _read_model_csv("error_by_month_hub.csv"), _read_model_csv("error_by_bucket.csv")
+    if hub.empty:
+        st.info("No error tables yet. Run `python pipeline/04_error_analysis.py` (Spark).")
+        return
+
+    st.markdown("**Where the model is wrong**")
+    st.caption(error_so_what(hub, bucket))
+    g = hub_error_gain(hub).melt(id_vars="hub", value_vars=["mae_gbt", "mae_lane_mean", "mae_no_change"],
+                                 var_name="model", value_name="mae")
+    fig = px.bar(g, x="hub", y="mae", color="model", barmode="group",
+                 labels={"mae": "MAE (min)", "hub": "Origin hub"})
+    fig.update_layout(height=340, paper_bgcolor="rgba(0,0,0,0)")
+    st.plotly_chart(fig, use_container_width=True)
+
+    if not hour.empty:
+        fig = px.line(hour, x="DepHourUTC", y=["mae_gbt", "mae_lane_mean"], markers=True,
+                      labels={"value": "MAE (min)", "DepHourUTC": "Wheels-off hour (UTC)"})
+        fig.update_layout(height=300, paper_bgcolor="rgba(0,0,0,0)")
+        st.plotly_chart(fig, use_container_width=True)
+
+    if not month.empty:
+        z = month.pivot(index="hub", columns="Month", values="mean_actual")
+        fig = go.Figure(go.Heatmap(z=z.values, x=z.columns, y=z.index, colorscale="RdYlGn_r", zmid=0,
+                                   colorbar=dict(title="Avg actual Δ (min)")))
+        fig.update_layout(height=460, paper_bgcolor="rgba(0,0,0,0)", xaxis_title="Month",
+                          yaxis_title="Origin hub", yaxis_autorange="reversed")
+        st.markdown("**Seasonality: average actual delta delay by hub and month (validation year)**")
+        st.plotly_chart(fig, use_container_width=True)
+
+    if not bucket.empty:
+        with st.expander("Error by actual delay bucket"):
+            st.dataframe(bucket.round(2), hide_index=True)
+
+
 def render_system_health(benchmark_df: pd.DataFrame):
     """System metrics tiles."""
     st.subheader("System Health")
@@ -674,7 +775,7 @@ def main():
     benchmark_df = read_benchmark_results()
 
     # Render panels
-    tab_live, tab_replay = st.tabs(["Live Radar", "Replay & Benchmark"])
+    tab_live, tab_replay, tab_model = st.tabs(["Live Radar", "Replay & Benchmark", "Model Insights"])
 
     with tab_live:
         render_live_radar(HUB_COORDS)
@@ -692,6 +793,9 @@ def main():
         render_system_health(benchmark_df)
         st.divider()
         render_benchmark(benchmark_df)
+
+    with tab_model:
+        render_model_insights()
 
     if auto_refresh:
         time.sleep(refresh_interval)
