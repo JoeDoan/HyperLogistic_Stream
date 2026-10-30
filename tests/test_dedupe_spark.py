@@ -23,6 +23,7 @@ def spark():
     try:
         s = (SparkSession.builder.master("local[1]").appName("dedupe-test")
              .config("spark.ui.enabled", "false")
+             .config("spark.sql.session.timeZone", "UTC")
              .config("spark.sql.shuffle.partitions", "1").getOrCreate())
     except Exception as exc:  # no JVM / broken Spark install
         pytest.skip(f"Spark unavailable: {exc}")

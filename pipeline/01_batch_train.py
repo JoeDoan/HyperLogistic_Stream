@@ -84,6 +84,7 @@ def build_spark(cores: int = None, shuffle_partitions: int = 64, driver_memory: 
         SparkSession.builder
         .appName(app_name)
         .master(core_str)
+        .config("spark.sql.session.timeZone", "UTC")
         .config("spark.sql.shuffle.partitions", str(shuffle_partitions))
         .config("spark.sql.adaptive.enabled", "true")
         .config("spark.sql.adaptive.coalescePartitions.enabled", "true")
@@ -277,8 +278,10 @@ def load_noaa_weather(spark: SparkSession, noaa_dir: str, years: list):
 
 
 def join_weather(flights_df, weather_df):
-    """Broadcast left-join NOAA weather twice: destination at scheduled arrival hour,
-    origin at wheels-off hour (both are known when the prediction is made)."""
+    """Broadcast left-join NOAA weather twice: origin at wheels-off UTC hour
+    (known at departure), whereas destination weather is joined from observed NOAA ISD
+    at the scheduled arrival UTC hour (sched_arr_hour_utc, 1 to 6 hours after departure,
+    acting as an oracle forecast upper bound for destination conditions)."""
     flights_df = (
         flights_df
         .withColumn("dest_icao", F.concat(F.lit("K"), F.col("Dest")))

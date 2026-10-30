@@ -65,6 +65,18 @@ def load_config():
     with open(cfg_path) as f:
         return yaml.safe_load(f)
 
+
+def get_high_risk_threshold(cfg: dict | None = None) -> float:
+    return float((cfg or load_config()).get("streaming", {}).get("high_risk_threshold_min", 5.0))
+
+
+def format_risk_metric_label(threshold: float) -> str:
+    return f"Elevated risk (Δ>{threshold:g}m)"
+
+
+def format_risk_chart_title(threshold: float) -> str:
+    return f"Elevated-Risk Arrivals (Δ > {threshold:g} min)"
+
 # Add list_parquet_files function for list parquet files
 def list_parquet_files(base: Path) -> list[Path]:
     """Committed Parquet files, newest first. Skips Spark temp/hidden files and files that vanish mid-scan."""
@@ -149,9 +161,28 @@ def read_benchmark_results() -> pd.DataFrame:
                 except Exception:
                     pass
 
-    if not all_records:
-        return pd.DataFrame()
-    return pd.DataFrame(all_records)
+    if all_records:
+        return pd.DataFrame(all_records)
+    for fname in ("benchmark_summary.csv", "summary.csv"):
+        summary_csv = bench_dir / fname
+        if summary_csv.exists():
+            return normalize_benchmark_summary(pd.read_csv(summary_csv))
+    return pd.DataFrame()
+
+
+def normalize_benchmark_summary(df: pd.DataFrame) -> pd.DataFrame:
+    rename_map = {
+        "label": "config",
+        "avg_throughput_rps": "throughput_rps",
+        "p50_batch_ms": "duration_ms",
+        "median_p50_latency_ms": "p50_latency_ms",
+        "median_p95_latency_ms": "p95_latency_ms",
+    }
+    out = df.rename(columns={k: v for k, v in rename_map.items() if k in df.columns and v not in df.columns})
+    for col in ("p50_latency_ms", "p95_latency_ms"):
+        if col not in out.columns:
+            out[col] = np.nan
+    return out
 
 
 def risk_color(delta: float) -> list:
@@ -168,6 +199,7 @@ def risk_color(delta: float) -> list:
 
 def demo_flights_df() -> pd.DataFrame:
     """Generate synthetic flight data for demo when pipeline hasn't run yet."""
+    thresh = get_high_risk_threshold()
     rng = np.random.default_rng(int(time.time()) % 100)
     hubs = list(HUB_COORDS.keys())
     rows = []
@@ -186,7 +218,7 @@ def demo_flights_df() -> pd.DataFrame:
             "dest_lat": d_lat, "dest_lon": d_lon,
             "dep_delay": dep_delay,
             "predicted_delta_delay": predicted_delta,
-            "is_high_risk": predicted_delta > 5,
+            "is_high_risk": predicted_delta > thresh,
         })
     return pd.DataFrame(rows)
 
@@ -194,6 +226,12 @@ def demo_flights_df() -> pd.DataFrame:
 def render_fleet_map(flights_df: pd.DataFrame):
     """Render the PyDeck arc map using fallback plotly scatter if pydeck unavailable."""
     st.subheader("Live Fleet Radar Map")
+    thresh = get_high_risk_threshold()
+
+    if "is_fallback_prediction" in flights_df.columns and any(
+        bool(v) for v in flights_df["is_fallback_prediction"] if pd.notna(v)
+    ):
+        st.warning("Gold table contains 0.0-minute fallback predictions generated with --allow-dummy-model.")
 
     if flights_df.empty:
         st.info("No live flight data — showing synthetic demo data.")
@@ -284,7 +322,7 @@ def render_fleet_map(flights_df: pd.DataFrame):
         st.metric("Flights shown (latest)", f"{flights_df['flight_id'].nunique():,}") # Total unique flights
     with col2:
         high_risk = int(flights_df["is_high_risk"].sum())
-        st.metric("Elevated risk (Δ>5m)", high_risk, delta=None)
+        st.metric(format_risk_metric_label(thresh), high_risk, delta=None)
     with col3:
         avg_delta = float(flights_df["predicted_delta_delay"].mean())
         st.metric("Avg Predicted Δ Delay", f"{avg_delta:.1f} min")
@@ -350,11 +388,12 @@ def render_hub_pressure(congestion_df: pd.DataFrame):
         st.plotly_chart(fig, width='stretch')
 
     with col2:
+        thresh = get_high_risk_threshold()
         fig2 = px.bar(
             congestion_df, x="dest", y="high_risk_count",
             color_discrete_sequence=["#dc2626"],
             labels={"dest": "Hub", "high_risk_count": "High-Risk Arrivals"},
-            title="Elevated-Risk Arrivals (Δ > 5 min)",
+            title=format_risk_chart_title(thresh),
         )
         fig2.update_layout(height=350, paper_bgcolor="rgba(0,0,0,0)")
         st.plotly_chart(fig2, use_container_width=True)
@@ -681,6 +720,25 @@ def render_system_health(benchmark_df: pd.DataFrame):
             st.metric("p95 E2E Latency", "—")
 
 
+def aggregate_benchmark(benchmark_df: pd.DataFrame) -> pd.DataFrame:
+    p95_batch_agg = (
+        ("p95_batch_ms", "median")
+        if "p95_batch_ms" in benchmark_df.columns
+        else ("duration_ms", lambda x: x.quantile(0.95))
+    )
+    return (
+        benchmark_df.groupby("config")
+        .agg(
+            avg_throughput=("throughput_rps", "mean"),
+            p50_batch_ms=("duration_ms", lambda x: x.quantile(0.50)),
+            p95_batch_ms=p95_batch_agg,
+            p50_latency_ms=("p50_latency_ms", "median"),
+            p95_latency_ms=("p95_latency_ms", "median"),
+        )
+        .reset_index()
+    )
+
+
 def render_benchmark(benchmark_df: pd.DataFrame):
     """RQ2 heatmap — throughput across (cores × shuffle_partitions)."""
     st.subheader("RQ2 Benchmark Results")
@@ -689,18 +747,7 @@ def render_benchmark(benchmark_df: pd.DataFrame):
         st.info("No benchmark results yet. Run: `python benchmark/run_benchmark.py`")
         return
 
-    # Aggregate per config
-    agg = (
-        benchmark_df.groupby("config")
-        .agg(
-            avg_throughput=("throughput_rps", "mean"),
-            p50_batch_ms=("duration_ms", lambda x: x.quantile(0.50)),
-            p95_batch_ms=("duration_ms", lambda x: x.quantile(0.95)),
-            p50_latency_ms=("p50_latency_ms", "median"),
-            p95_latency_ms=("p95_latency_ms", "median"),
-        )
-        .reset_index()
-    )
+    agg = aggregate_benchmark(benchmark_df)
 
     st.caption(benchmark_headline(agg))
 
