@@ -1,8 +1,9 @@
 # EVALUATION.md: HyperLogistic_Stream
 
-> CS 5540. Every number below comes from a file committed in this repo (`models/ablation.csv`,
-> `models/training_metrics.json`, `models/baseline_hub_hour_dow.csv`, `models/error_by_*.csv`,
-> `benchmark/results/summary.csv`) or from `pytest`. Nothing is hand-edited.
+> CS 5540. RQ1 accuracy, ablation, and error tables come directly from Spark training outputs
+> committed in `models/` (`ablation.csv`, `training_metrics.json`, `baseline_hub_hour_dow.csv`,
+> `error_by_*.csv`), `benchmark/results/benchmark_summary.csv` records the 12-configuration Colab
+> streaming sweep in Section 4, and correctness counts come from `pytest`.
 
 ## 1. What is evaluated
 
@@ -11,7 +12,7 @@
 | Does the model predict delay change better than simple baselines? | `models/ablation.csv` | 2 |
 | Do weather features help? | same ablation | 3 |
 | Where is the model wrong? | `models/error_by_*.csv` | 3.1 |
-| How fast is the streaming pipeline, and what drives it? | `benchmark/results/summary.csv` | 4 |
+| How fast is the streaming pipeline, and what drives it? | `benchmark/results/benchmark_summary.csv` | 4 |
 | Are Gold writes repeat-safe? | `tests/test_dedupe_spark.py` | 5 |
 | What can we **not** claim? | | 6 |
 
@@ -150,7 +151,7 @@ What the data supports:
 
 ## 5. Correctness tests
 
-`pytest` runs 58 tests in GitHub Actions (`.github/workflows/ci.yml`), split into 50 pure-Python tests and 8 Spark tests.
+`pytest` runs 59 tests in GitHub Actions (`.github/workflows/ci.yml`), split into 51 pure-Python tests and 8 Spark tests.
 
 | Area | Tests | What it proves |
 |---|---|---|
@@ -158,13 +159,13 @@ What the data supports:
 | Error analysis tables | 2 (`test_error_analysis_spark.py`, real Spark) | Per-bucket and per-hub MAE, bias, and baseline comparisons match expected aggregations |
 | Live OpenSky aggregation | 3 (`test_live_processor_spark.py`, real Spark) | Only the latest `fetched_at` snapshot is counted, duplicate `icao24` transponders are deduplicated, and zero-traffic hubs emit `aircraft_nearby = 0` |
 | Train/serve and Spark contracts | 10 (`test_pipeline_contracts.py`) | Local `flight_date` survives UTC midnight rollovers, missing models fail fast unless `--allow-dummy-model` is set, and all 6 Spark builders pin `spark.sql.session.timeZone=UTC` |
-| Live radar and producer resilience | 11 (`test_live_radar_and_producer.py`) | Recorded sessions anchor FAA freshness to snapshot timestamps, HTTP `429` `Retry-After` triggers cooldowns, Kafka sink errors do not crash polling threads, and `summary.csv` loads cleanly |
+| Live radar, producer, and benchmark | 12 (`test_live_radar_and_producer.py`) | Recorded sessions anchor FAA freshness to snapshot timestamps, HTTP `429` `Retry-After` triggers cooldowns, Kafka sink errors do not crash polling threads, `run_benchmark.py` forwards `--config`, and `benchmark_summary.csv` loads cleanly |
 | Output isolation and reset | 9 (`test_stream_utils.py`) | Benchmark runs write to isolated roots, and `--reset` validates every target atomically before deleting inside the project or configured external roots |
 | Config consistency | 5 (`test_config.py`) | Both configs list all 8 weather features, and the stream year is excluded from training years |
 | Model insight helpers | 6 (`test_model_insights.py`) | Feature importances sum cleanly by group, per-hub MAE gain is computed accurately, and error summary copy handles edge cases |
 | Dashboard story helpers | 9 (`test_dashboard_helpers.py`) | Weather buckets, the "so what" sentence, thin-lane filtering, and the benchmark headline match measured inputs |
 
-The 50 pure-Python tests run in under 1 second without starting a JVM. GitHub Actions runs all 58 tests on Ubuntu with Java 17 and PySpark 3.5.0. On Windows without Hadoop's `winutils`, the two Gold-reading Spark tests skip and the pipeline falls back to batch-level dedupe.
+The 51 pure-Python tests run in under 1 second without starting a JVM. GitHub Actions runs all 59 tests on Ubuntu with Java 17 and PySpark 3.5.1. On Windows without Hadoop's `winutils`, the two Gold-reading Spark tests skip and the pipeline falls back to batch-level dedupe.
 
 ## 6. Limits: what we cannot claim
 

@@ -163,10 +163,26 @@ def read_benchmark_results() -> pd.DataFrame:
 
     if all_records:
         return pd.DataFrame(all_records)
-    summary_csv = bench_dir / "summary.csv"
-    if summary_csv.exists():
-        return pd.read_csv(summary_csv)
+    for fname in ("benchmark_summary.csv", "summary.csv"):
+        summary_csv = bench_dir / fname
+        if summary_csv.exists():
+            return normalize_benchmark_summary(pd.read_csv(summary_csv))
     return pd.DataFrame()
+
+
+def normalize_benchmark_summary(df: pd.DataFrame) -> pd.DataFrame:
+    rename_map = {
+        "label": "config",
+        "avg_throughput_rps": "throughput_rps",
+        "p50_batch_ms": "duration_ms",
+        "median_p50_latency_ms": "p50_latency_ms",
+        "median_p95_latency_ms": "p95_latency_ms",
+    }
+    out = df.rename(columns={k: v for k, v in rename_map.items() if k in df.columns and v not in df.columns})
+    for col in ("p50_latency_ms", "p95_latency_ms"):
+        if col not in out.columns:
+            out[col] = np.nan
+    return out
 
 
 def risk_color(delta: float) -> list:

@@ -307,3 +307,24 @@ def test_bundled_sample_recording_loads_with_active_faa_programs(dash, tmp_path)
     hubs = live_radar.build_hub_state(prepared, dash.HUB_COORDS).set_index("airport")
     assert hubs.loc["LAS", "faa_severity"] == 3
     assert hubs.loc["PHX", "faa_severity"] == 2
+
+
+def test_canonical_benchmark_summary_and_config_forwarding(dash, tmp_path):
+    loaded = dash.read_benchmark_results()
+    agg = dash.aggregate_benchmark(loaded)
+    assert len(agg) == 12
+    assert agg["avg_throughput"].max() == pytest.approx(4448.0)
+
+    from benchmark import run_benchmark as rb
+
+    with patch.object(rb.subprocess, "Popen") as mock_popen:
+        rb.start_producer("localhost:9092", "flights_stream", 5000, config_path="config/pipeline_config_colab.yaml")
+        prod_cmd = mock_popen.call_args[0][0]
+        assert prod_cmd[-2:] == ["--config", "config/pipeline_config_colab.yaml"]
+
+    cfg = {"kafka": {"bootstrap_servers": "localhost:9092"}, "paths": {"benchmark_results": str(tmp_path)}}
+    with patch.object(rb.subprocess, "run") as mock_run:
+        rb.run_streaming_job(cfg, 4, 8, 20000, "c4_sp8_r5000_mo20000", config_path="config/pipeline_config_colab.yaml")
+        stream_cmd = mock_run.call_args[0][0]
+        assert stream_cmd[-2:] == ["--config", "config/pipeline_config_colab.yaml"]
+
