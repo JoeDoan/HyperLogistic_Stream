@@ -135,6 +135,7 @@ def build_spark(cores: int, shuffle_partitions: int) -> SparkSession:
         .appName("HyperLogistics-Live")
         .master(f"local[{cores}]")
         .config("spark.jars.packages", "org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.0")
+        .config("spark.sql.session.timeZone", "UTC")
         .config("spark.sql.shuffle.partitions", str(shuffle_partitions))
         .config("spark.sql.adaptive.enabled", "false")
         .config("spark.driver.memory", "2g")
@@ -230,24 +231,53 @@ def transform_faa(df):
 
 
 def transform_traffic(df, hubs_df, radius_km):
-    ac = df.filter((F.col("on_ground") == False) & F.col("lat").isNotNull() & F.col("lon").isNotNull())  # noqa: E712
+    keyed = df.withColumn("_snap_key", F.coalesce(F.col("fetched_at"), F.lit("")))
+    latest_key = keyed.agg(F.max("_snap_key").alias("_snap_key")).filter(F.col("_snap_key").isNotNull())
+    snap = keyed.join(latest_key, on="_snap_key", how="inner").drop("_snap_key").dropDuplicates(["icao24"])
+
+    meta = (
+        snap.agg(
+            F.count("*").alias("_snap_n"),
+            F.max("emit_epoch_ms").alias("emit_epoch_ms"),
+            F.max(F.col("stale").cast("int")).cast("boolean").alias("stale"),
+            F.max("stale_age_s").alias("stale_age_s"),
+            F.max("fetched_at").alias("fetched_at"),
+        )
+        .filter(F.col("_snap_n") > 0)
+        .drop("_snap_n")
+    )
+
+    ac = snap.filter((F.col("on_ground") == False) & F.col("lat").isNotNull() & F.col("lon").isNotNull())  # noqa: E712
     j = ac.crossJoin(F.broadcast(hubs_df))
     dlat = F.radians(F.col("hub_lat") - F.col("lat"))
     dlon = F.radians(F.col("hub_lon") - F.col("lon"))
     a = (F.sin(dlat / 2) ** 2) + F.cos(F.radians(F.col("lat"))) * F.cos(F.radians(F.col("hub_lat"))) * (F.sin(dlon / 2) ** 2)
     dist_km = F.lit(2 * 6371.0) * F.asin(F.sqrt(a))
-    near = j.withColumn("dist_km", dist_km).filter(F.col("dist_km") <= radius_km)
-    return (
-        near.groupBy("airport")
+    counts = (
+        j.withColumn("dist_km", dist_km)
+        .filter(F.col("dist_km") <= radius_km)
+        .groupBy("airport")
         .agg(
             F.count("*").alias("aircraft_nearby"),
             F.sum(F.when(F.col("baro_altitude") < 3000, 1).otherwise(0)).alias("low_altitude_count"),
             F.sum(F.when(F.col("vertical_rate") < -1.0, 1).otherwise(0)).alias("descending_count"),
             F.avg("baro_altitude").alias("avg_altitude_m"),
-            F.max("emit_epoch_ms").alias("emit_epoch_ms"),
-            F.max(F.col("stale").cast("int")).cast("boolean").alias("stale"),
-            F.max("stale_age_s").alias("stale_age_s"),
-            F.max("fetched_at").alias("fetched_at"),
+        )
+    )
+
+    base = F.broadcast(hubs_df.select("airport")).crossJoin(meta)
+    return (
+        base.join(counts, on="airport", how="left")
+        .select(
+            F.col("airport"),
+            F.coalesce(F.col("aircraft_nearby"), F.lit(0)).cast("long").alias("aircraft_nearby"),
+            F.coalesce(F.col("low_altitude_count"), F.lit(0)).cast("long").alias("low_altitude_count"),
+            F.coalesce(F.col("descending_count"), F.lit(0)).cast("long").alias("descending_count"),
+            F.col("avg_altitude_m").cast("double").alias("avg_altitude_m"),
+            F.col("emit_epoch_ms"),
+            F.col("stale"),
+            F.col("stale_age_s"),
+            F.col("fetched_at"),
         )
         .withColumn("radius_km", F.lit(float(radius_km)))
         .withColumn("snapshot_ts", F.current_timestamp())

@@ -10,6 +10,7 @@ Shows which US hubs are under stress RIGHT NOW by combining three live feeds:
 Data source priority (so the tab works with or without Kafka/Spark):
   1. Spark Gold live tables  data/gold/live/{weather,airport_status,hub_traffic}
   2. Latest recorded session data/live_recordings/*.jsonl  (live_producer.py --record)
+  3. Bundled sample session  data/sample/live_session_*.jsonl
 
 Honest limits (also shown in the UI): OpenSky has no delay minutes, so "stress" is
 FAA severity + weather severity, not a measured delay. Flights are a public proxy
@@ -30,6 +31,7 @@ import streamlit as st
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 GOLD_LIVE = PROJECT_ROOT / "data" / "gold" / "live"
 RECORD_DIR = PROJECT_ROOT / "data" / "live_recordings"
+SAMPLE_DIR = PROJECT_ROOT / "data" / "sample"
 BASELINE_CSV = PROJECT_ROOT / "models" / "baseline_hub_hour_dow.csv"  # written by 01_batch_train.py
 
 AIRPORT_TZ = {
@@ -144,27 +146,46 @@ def _read_gold(name: str, max_files: int = 30) -> pd.DataFrame:
     return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
 
 
-def _read_latest_recording() -> dict:
-    """Return {topic: DataFrame} from the newest recorded session (or {} if none)."""
-    if not RECORD_DIR.exists():
-        return {}
-    files = sorted(RECORD_DIR.glob("live_session_*.jsonl"), key=lambda p: p.stat().st_mtime, reverse=True)
-    if not files:
-        return {}
+def _find_recording_file(
+    record_dir: Path | None = None,
+    sample_dir: Path | None = None,
+) -> tuple[Path | None, str]:
+    rdir = RECORD_DIR if record_dir is None else record_dir
+    sdir = SAMPLE_DIR if sample_dir is None else sample_dir
+    for folder, label in ((rdir, "Recorded live session"), (sdir, "Sample recorded session")):
+        if folder.exists():
+            files = sorted(folder.glob("live_session_*.jsonl"), key=lambda p: p.stat().st_mtime, reverse=True)
+            if files:
+                return files[0], label
+    return None, "none"
+
+
+def _read_latest_recording(
+    record_dir: Path | None = None,
+    sample_dir: Path | None = None,
+) -> tuple[dict, str]:
+    """Return ({topic: DataFrame}, source_label) from the newest recorded or sample session."""
+    fpath, label = _find_recording_file(record_dir=record_dir, sample_dir=sample_dir)
+    if fpath is None:
+        return {}, "none"
     buckets: dict = {}
-    with open(files[0], encoding="utf-8") as f:
+    with open(fpath, encoding="utf-8") as f:
         for line in f:
             try:
                 rec = json.loads(line)
                 buckets.setdefault(rec["topic"], []).append(rec["value"])
             except Exception:
                 continue
-    return {t: pd.DataFrame(v) for t, v in buckets.items()}
+    if not buckets:
+        return {}, "none"
+    return {t: pd.DataFrame(v) for t, v in buckets.items()}, label
 
 
 def _latest_by(df: pd.DataFrame, key: str, ts: str = "fetched_at") -> pd.DataFrame:
     if df.empty or key not in df.columns:
         return df
+    if ts not in df.columns:
+        return df.drop_duplicates(key, keep="last")
     return df.sort_values(ts).drop_duplicates(key, keep="last")
 
 
@@ -175,6 +196,78 @@ def _latest_snapshot(df: pd.DataFrame, ts: str = "fetched_at") -> pd.DataFrame:
     return df[df[ts] == df[ts].max()]
 
 
+def _max_fetched_utc(*dfs: pd.DataFrame) -> datetime | None:
+    best: datetime | None = None
+    for df in dfs:
+        if df is None or df.empty or "fetched_at" not in df.columns:
+            continue
+        ts = pd.to_datetime(df["fetched_at"], utc=True, errors="coerce").max()
+        if pd.isna(ts):
+            continue
+        dt = ts.to_pydatetime().astimezone(timezone.utc)
+        if best is None or dt > best:
+            best = dt
+    return best
+
+
+def _any_truthy(series: pd.Series) -> bool:
+    return any(bool(v) for v in series if pd.notna(v))
+
+
+def prepare_live_feeds(
+    weather: pd.DataFrame,
+    faa: pd.DataFrame,
+    traffic: pd.DataFrame,
+    source: str,
+    now_utc: datetime | None = None,
+) -> dict:
+    now_utc = now_utc or datetime.now(timezone.utc)
+    is_recorded = source in ("Recorded live session", "Sample recorded session")
+    ref_utc = (_max_fetched_utc(weather, faa, traffic) or now_utc) if is_recorded else now_utc
+
+    weather = _latest_by(_enrich_weather(weather), "airport")
+    faa = _enrich_faa(faa)
+    traffic = _latest_by(traffic, "airport", "fetched_at") if not traffic.empty else traffic
+
+    feed_stale = {"weather": False, "faa": False, "traffic": False}
+    if not is_recorded:
+        for feed_name, feed_df in (("weather", weather), ("traffic", traffic)):
+            if feed_df.empty:
+                continue
+            flagged = _any_truthy(feed_df["stale"]) if "stale" in feed_df.columns else False
+            feed_ts = _max_fetched_utc(feed_df)
+            aged_out = (ref_utc - feed_ts).total_seconds() > STALE_AFTER_S if feed_ts is not None else False
+            feed_stale[feed_name] = flagged or aged_out
+
+    faa_latest = _latest_snapshot(faa)
+    if not faa_latest.empty and "fetched_at" in faa_latest.columns:
+        faa_ts = _max_fetched_utc(faa_latest)
+        faa_age = (ref_utc - faa_ts).total_seconds() if faa_ts is not None else 0.0
+        faa_flagged_stale = _any_truthy(faa_latest["stale"]) if "stale" in faa_latest.columns else False
+        if is_recorded:
+            age_vs_ref = (
+                ref_utc - pd.to_datetime(faa_latest["fetched_at"], utc=True, errors="coerce")
+            ).dt.total_seconds()
+            faa_latest = faa_latest[age_vs_ref <= FAA_MAX_AGE_S]
+        else:
+            if faa_flagged_stale:
+                feed_stale["faa"] = True
+            elif faa_age > FAA_MAX_AGE_S:
+                feed_stale["faa"] = True
+                faa_latest = faa_latest.iloc[0:0]
+    faa = faa_latest
+
+    return {
+        "source": source,
+        "weather": weather,
+        "faa": faa,
+        "traffic": traffic,
+        "reference_utc": ref_utc,
+        "feed_stale": feed_stale,
+        "is_recorded": is_recorded,
+    }
+
+
 @st.cache_data(ttl=10)
 def load_live(hub_coords: dict) -> dict:
     weather = _read_gold("weather")
@@ -183,25 +276,24 @@ def load_live(hub_coords: dict) -> dict:
     source = "Spark Gold (live)"
 
     if weather.empty and faa.empty and traffic.empty:
-        rec = _read_latest_recording()
+        rec, rec_source = _read_latest_recording()
         if not rec:
-            return {"source": "none", "weather": pd.DataFrame(), "faa": pd.DataFrame(),
-                    "traffic": pd.DataFrame()}
+            return {
+                "source": "none",
+                "weather": pd.DataFrame(),
+                "faa": pd.DataFrame(),
+                "traffic": pd.DataFrame(),
+                "reference_utc": None,
+                "feed_stale": {"weather": False, "faa": False, "traffic": False},
+                "is_recorded": False,
+            }
         weather = rec.get("weather", pd.DataFrame())
         faa = rec.get("airport_status", pd.DataFrame())
-        flights = rec.get("live_flights", pd.DataFrame())
-        flights = _latest_snapshot(flights)
+        flights = _latest_snapshot(rec.get("live_flights", pd.DataFrame()))
         traffic = _traffic_from_flights(flights, hub_coords)
-        source = "Recorded live session"
+        source = rec_source
 
-    weather = _latest_by(_enrich_weather(weather), "airport")
-    faa = _enrich_faa(faa)
-    if not faa.empty and "fetched_at" in faa.columns:
-        age = (datetime.now(timezone.utc) - pd.to_datetime(faa["fetched_at"], utc=True)).dt.total_seconds()
-        faa = faa[age <= FAA_MAX_AGE_S]
-        faa = _latest_snapshot(faa)
-    traffic = _latest_by(traffic, "airport", "fetched_at") if not traffic.empty else traffic
-    return {"source": source, "weather": weather, "faa": faa, "traffic": traffic}
+    return prepare_live_feeds(weather, faa, traffic, source)
 
 
 # ------------------------------- hub state -------------------------------------
@@ -216,12 +308,12 @@ def _load_baseline_csv() -> pd.DataFrame:
         return pd.DataFrame()
 
 
-def _merge_baseline_csv(hubs: pd.DataFrame) -> pd.DataFrame:
-    """Attach typical delay for each hub's CURRENT local hour and weekday (Spark dow: Sun=1)."""
+def _merge_baseline_csv(hubs: pd.DataFrame, reference_utc: datetime | None = None) -> pd.DataFrame:
+    """Attach typical delay for each hub's local hour and weekday (Spark dow: Sun=1)."""
     base = _load_baseline_csv()
     if base.empty:
         return hubs
-    now_utc = datetime.now(timezone.utc)
+    now_utc = reference_utc or datetime.now(timezone.utc)
     keys = []
     for code in hubs["airport"]:
         local = now_utc.astimezone(ZoneInfo(AIRPORT_TZ.get(code, "UTC")))
@@ -270,9 +362,15 @@ def build_hub_state(data: dict, hub_coords: dict) -> pd.DataFrame:
         if col not in hubs.columns:
             hubs[col] = None
 
+    if data.get("feed_stale", {}).get("faa") and "faa_programs" in hubs.columns:
+        mask = hubs["faa_programs"].notna() & (hubs["faa_programs"].astype(str).str.len() > 0)
+        hubs.loc[mask, "faa_programs"] = hubs.loc[mask, "faa_programs"].astype(str).map(
+            lambda s: s if s.endswith(" [stale]") else f"{s} [stale]"
+        )
+
     # Historical baseline (typical delay for this hub, local hour and weekday) from 01_batch_train.py.
     if "typical_delay_min" not in hubs.columns or hubs["typical_delay_min"].isna().all():
-        hubs = _merge_baseline_csv(hubs)
+        hubs = _merge_baseline_csv(hubs, reference_utc=data.get("reference_utc"))
     if "typical_delay_min" not in hubs.columns:
         hubs["typical_delay_min"] = np.nan
 
@@ -308,28 +406,48 @@ def _story_line(r: pd.Series) -> str:
 
 # --------------------------------- UI ------------------------------------------
 
-def _status_badge(hubs: pd.DataFrame, source: str):
-    stale_flag = bool(hubs["stale"].fillna(False).astype(bool).any()) if "stale" in hubs.columns else False
-    newest = None
-    if "fetched_at" in hubs.columns:
-        ts = pd.to_datetime(hubs["fetched_at"], utc=True, errors="coerce").max()
-        newest = None if pd.isna(ts) else ts
-    age = (datetime.now(timezone.utc) - newest).total_seconds() if newest is not None else None
-    is_stale = stale_flag or (age is not None and age > STALE_AFTER_S)
+def compute_status_badge(
+    hubs: pd.DataFrame,
+    data: dict | str,
+    now_utc: datetime | None = None,
+) -> tuple[str, str, str]:
+    if isinstance(data, str):
+        data = {"source": data}
+    source = data.get("source", "Spark Gold (live)")
+    feed_stale = data.get("feed_stale") or {}
+    stale_feeds = [name for name in ("weather", "faa", "traffic") if feed_stale.get(name)]
 
-    if source == "Recorded live session":
+    stale_flag = _any_truthy(hubs["stale"]) if "stale" in hubs.columns else False
+    newest = _max_fetched_utc(hubs, data.get("weather"), data.get("faa"), data.get("traffic"))
+    now_val = now_utc or datetime.now(timezone.utc)
+    age = (now_val - newest).total_seconds() if newest is not None else None
+    is_stale = bool(stale_feeds) or stale_flag or (age is not None and age > STALE_AFTER_S)
+
+    if source == "Sample recorded session":
+        label, color = "SAMPLE", "#6366f1"
+    elif source == "Recorded live session":
         label, color = "RECORDED", "#6366f1"
     elif is_stale:
         label, color = "STALE", "#f97316"
     else:
         label, color = "LIVE", "#10b981"
 
-    age_txt = f"updated {int(age)}s ago" if age is not None and age < 3600 else (
-        f"last data {newest:%b %d %H:%M} UTC" if newest is not None else "no timestamp")
+    if source in ("Recorded live session", "Sample recorded session"):
+        age_txt = f"last data {newest:%b %d %H:%M} UTC" if newest is not None else "no timestamp"
+    else:
+        age_txt = f"updated {int(age)}s ago" if age is not None and age < 3600 else (
+            f"last data {newest:%b %d %H:%M} UTC" if newest is not None else "no timestamp")
+        if stale_feeds:
+            age_txt = f"{age_txt} · stale feeds: {', '.join(stale_feeds)}"
+    return label, color, f"{source} · {age_txt}"
+
+
+def _status_badge(hubs: pd.DataFrame, data: dict):
+    label, color, subtitle = compute_status_badge(hubs, data)
     st.markdown(
         f"<span style='background:{color};color:white;padding:4px 12px;border-radius:12px;"
         f"font-weight:700;letter-spacing:1px'>{label}</span> "
-        f"<span style='color:#9ca3af;margin-left:8px'>{source} · {age_txt}</span>",
+        f"<span style='color:#9ca3af;margin-left:8px'>{subtitle}</span>",
         unsafe_allow_html=True)
 
 
@@ -368,7 +486,7 @@ def render_live_radar(hub_coords: dict):
         return
 
     hubs = build_hub_state(data, hub_coords)
-    _status_badge(hubs, data["source"])
+    _status_badge(hubs, data)
     st.write("")
 
     c1, c2, c3, c4 = st.columns(4)
