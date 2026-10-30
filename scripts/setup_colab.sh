@@ -12,13 +12,11 @@ echo "========================================"
 echo "  HyperLogistics-Stream: Colab Setup"
 echo "========================================"
 
-# --- 1. Java (use whatever Colab provides; 11, 17, 21 all work with PySpark 3.5) ---
 echo "[1/5] Checking Java..."
 java -version 2>&1 | head -1
 export JAVA_HOME=$(readlink -f /usr/bin/java | sed 's|/bin/java||')
 echo "  JAVA_HOME=$JAVA_HOME"
 
-# --- 2. Python packages ---
 echo "[2/5] Installing Python packages..."
 pip install -q \
     "pyspark==3.5.0" \
@@ -34,17 +32,14 @@ pip install -q \
     "tzdata>=2024.1"
 echo "  Python packages installed."
 
-# --- 3. Kafka binary ---
 echo "[3/5] Setting up Kafka ${KAFKA_VERSION}..."
 if [ ! -d "$KAFKA_DIR" ]; then
     mkdir -p /opt /tmp/kafka_dl
     cd /tmp/kafka_dl
 
-    # Always re-download to avoid a stale partial tarball from a prior failed run
     echo "  Downloading Kafka (113 MB)..."
     wget -q --show-progress "$KAFKA_URL" -O "$KAFKA_TARBALL"
 
-    # Verify the tarball is intact before extracting
     if ! gzip -t "$KAFKA_TARBALL" 2>/dev/null; then
         echo "ERROR: Downloaded tarball is corrupt. Re-run the cell." >&2
         rm -f "$KAFKA_TARBALL"
@@ -58,12 +53,10 @@ else
     echo "  Kafka already installed at $KAFKA_DIR"
 fi
 
-# --- 4. Start Zookeeper ---
 echo "[4/5] Starting Zookeeper..."
 $KAFKA_DIR/bin/zookeeper-server-start.sh -daemon $KAFKA_DIR/config/zookeeper.properties
 sleep 4
 
-# Verify Zookeeper is listening on 2181
 for i in $(seq 1 10); do
     if nc -z localhost 2181 2>/dev/null; then
         echo "  Zookeeper ready (attempt $i)."
@@ -72,7 +65,6 @@ for i in $(seq 1 10); do
     sleep 2
 done
 
-# --- 5. Start Kafka broker ---
 echo "[5/5] Starting Kafka broker..."
 cat >> $KAFKA_DIR/config/server.properties <<'EOF'
 
@@ -85,7 +77,6 @@ EOF
 
 $KAFKA_DIR/bin/kafka-server-start.sh -daemon $KAFKA_DIR/config/server.properties
 
-# Wait until Kafka is actually accepting connections (up to 60 s)
 echo "  Waiting for Kafka broker..."
 READY=false
 for i in $(seq 1 30); do
@@ -102,7 +93,6 @@ if [ "$READY" = false ]; then
     exit 1
 fi
 
-# Create flights_stream topic
 $KAFKA_DIR/bin/kafka-topics.sh \
     --bootstrap-server localhost:9092 \
     --create --if-not-exists \

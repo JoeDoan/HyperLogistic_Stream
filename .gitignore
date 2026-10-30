@@ -27,9 +27,21 @@ pip-delete-this-directory.txt
 # Apache Spark & Hadoop artifacts
 metastore_db/
 derby.log
+checkpoints/
 checkpoint/
 spark-warehouse/
 *.dump
+
+# Benchmark results (keep summary, ignore raw jsonl)
+benchmark/results/*.jsonl
+
+# Models (large binary artifacts)
+models/gbt_pipeline_v1/
+models/rf_pipeline_v1/
+models/lane_mean.parquet
+
+# Environment
+.env
 
 # LaTeX auxiliary files (keep .tex and .pdf)
 *.aux
@@ -44,3 +56,5 @@ spark-warehouse/
 # Editor & IDE settings
 .vscode/
 .idea/
+docs/Phase 2/ENHANCED_IMPLEMENTATION_PLAN_STREAM.md
+docs/Phase 2/ENHANCED_IMPLEMENTATION_PLAN_STREAM.md
