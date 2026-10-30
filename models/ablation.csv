@@ -1,0 +1,7 @@
+model,description,n_features,val_mae,val_rmse,train_sec,mae_gain_vs_no_weather_pct,train_years,val_year
+baseline_no_change,predict delta = 0,0,12.7493,16.6266,0.0,-19.83,"2018,2019,2021,2022,2023",2024
+baseline_lane_mean,training lane mean delta,1,10.7985,15.3289,0.0,-1.49,"2018,2019,2021,2022,2023",2024
+gbt_no_weather,lane + schedule only,6,10.6395,15.02,288.1,0.0,"2018,2019,2021,2022,2023",2024
+gbt_dest_wind_vis_temp,"+ destination wind, visibility, temp (v1)",9,10.6008,14.9687,286.1,0.36,"2018,2019,2021,2022,2023",2024
+gbt_dest_plus_ceiling,+ destination ceiling,10,10.5917,14.9596,288.6,0.45,"2018,2019,2021,2022,2023",2024
+gbt_full_weather,"+ origin wind, visibility, ceiling, temp",14,10.5325,14.8635,295.1,1.01,"2018,2019,2021,2022,2023",2024
