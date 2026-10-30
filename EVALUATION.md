@@ -1,8 +1,8 @@
 # EVALUATION.md: HyperLogistic_Stream
 
-> CS 5540. Every number below comes from a file in this repo (`models/ablation.csv`,
-> `models/training_metrics.json`, `models/baseline_hub_hour_dow.csv`,
-> `benchmark/results/*.jsonl`) or from `pytest`. Nothing is hand-edited.
+> CS 5540. Every number below comes from a file committed in this repo (`models/ablation.csv`,
+> `models/training_metrics.json`, `models/baseline_hub_hour_dow.csv`, `models/error_by_*.csv`,
+> `benchmark/results/summary.csv`) or from `pytest`. Nothing is hand-edited.
 
 ## 1. What is evaluated
 
@@ -11,7 +11,7 @@
 | Does the model predict delay change better than simple baselines? | `models/ablation.csv` | 2 |
 | Do weather features help? | same ablation | 3 |
 | Where is the model wrong? | `models/error_by_*.csv` | 3.1 |
-| How fast is the streaming pipeline, and what drives it? | `benchmark/results/` | 4 |
+| How fast is the streaming pipeline, and what drives it? | `benchmark/results/summary.csv` | 4 |
 | Are Gold writes repeat-safe? | `tests/test_dedupe_spark.py` | 5 |
 | What can we **not** claim? | | 6 |
 
@@ -75,8 +75,8 @@ hubs, its MAE is 10.53 min, matching `training_metrics.json`. The model never tr
 | Worst | JFK | 14.02 | 14.43 | 17.66 |
 | | EWR | 12.81 | 13.28 | 15.81 |
 | | BOS | 12.11 | 12.43 | 15.04 |
-| Best | ATL | 9.20 | 9.25 | 10.72 |
-| | PHX | 8.88 | 9.01 | 10.93 |
+| | ATL | 9.20 | 9.25 | 10.72 |
+| Best | PHX | 8.88 | 9.01 | 10.93 |
 
 - Northeast hubs are hardest to predict. JFK's error is about 58% higher than PHX's.
 - The GBT beats the lane-mean baseline at **every** hub, but only by 0.05 min (ATL) to 0.50 min
@@ -150,17 +150,21 @@ What the data supports:
 
 ## 5. Correctness tests
 
-`pytest` runs 23 tests locally and in GitHub Actions (`.github/workflows/ci.yml`).
+`pytest` runs 58 tests in GitHub Actions (`.github/workflows/ci.yml`), split into 50 pure-Python tests and 8 Spark tests.
 
 | Area | Tests | What it proves |
 |---|---|---|
 | Repeat-safe Gold writes | 3 (`test_dedupe_spark.py`, real Spark) | Duplicates inside a batch are dropped, rows already in Gold are dropped, and **replaying the same batch adds 0 rows** |
-| Output isolation and reset | 6 | Benchmark runs write to their own root. `--reset` deletes inside the project but refuses outside paths and the project root |
-| Config consistency | 5 | Both configs list all 8 weather features. The stream year is not in the training years |
-| Dashboard story helpers | 9 | Weather buckets, the "so what" sentence, thin-lane filtering and the benchmark headline are computed correctly |
+| Error analysis tables | 2 (`test_error_analysis_spark.py`, real Spark) | Per-bucket and per-hub MAE, bias, and baseline comparisons match expected aggregations |
+| Live OpenSky aggregation | 3 (`test_live_processor_spark.py`, real Spark) | Only the latest `fetched_at` snapshot is counted, duplicate `icao24` transponders are deduplicated, and zero-traffic hubs emit `aircraft_nearby = 0` |
+| Train/serve and Spark contracts | 10 (`test_pipeline_contracts.py`) | Local `flight_date` survives UTC midnight rollovers, missing models fail fast unless `--allow-dummy-model` is set, and all 6 Spark builders pin `spark.sql.session.timeZone=UTC` |
+| Live radar and producer resilience | 11 (`test_live_radar_and_producer.py`) | Recorded sessions anchor FAA freshness to snapshot timestamps, HTTP `429` `Retry-After` triggers cooldowns, Kafka sink errors do not crash polling threads, and `summary.csv` loads cleanly |
+| Output isolation and reset | 9 (`test_stream_utils.py`) | Benchmark runs write to isolated roots, and `--reset` validates every target atomically before deleting inside the project or configured external roots |
+| Config consistency | 5 (`test_config.py`) | Both configs list all 8 weather features, and the stream year is excluded from training years |
+| Model insight helpers | 6 (`test_model_insights.py`) | Feature importances sum cleanly by group, per-hub MAE gain is computed accurately, and error summary copy handles edge cases |
+| Dashboard story helpers | 9 (`test_dashboard_helpers.py`) | Weather buckets, the "so what" sentence, thin-lane filtering, and the benchmark headline match measured inputs |
 
-The Spark tests were run on Linux (Colab, 23 passed). On Windows without Hadoop's `winutils`, the
-two Gold-reading tests skip, and the pipeline falls back to batch-level dedupe.
+The 50 pure-Python tests run in under 1 second without starting a JVM. GitHub Actions runs all 58 tests on Ubuntu with Java 17 and PySpark 3.5.0. On Windows without Hadoop's `winutils`, the two Gold-reading Spark tests skip and the pipeline falls back to batch-level dedupe.
 
 ## 6. Limits: what we cannot claim
 
@@ -181,12 +185,17 @@ two Gold-reading tests skip, and the pipeline falls back to batch-level dedupe.
    `delta_delay`), not measured delays.
 7. **Proxy data.** Results describe commercial flights. Applying them to freight is an
    assumption.
+8. **Oracle destination weather.** Origin weather is joined at the departure hour (`wheels_off_hour_utc`),
+   which is observed when the prediction runs. Destination weather (`DestWindSpeed`, `DestVisibility`,
+   `DestTemp`, `DestCeiling`) is joined from observed NOAA ISD at the scheduled arrival hour
+   (`sched_arr_hour_utc`), 1 to 6 hours after departure, rather than an airport forecast (TAF). That
+   makes the +1.01% weather ablation gain an upper bound on what forecast arrival weather can deliver.
 
 ## 7. Reproduce
 
 ```bash
-python -m pytest -v                       # tests (23)
-python pipeline/01_batch_train.py         # retrain; writes models/ablation.csv (long, use Colab)
-python pipeline/04_error_analysis.py --config config/pipeline_config_colab.yaml  # error tables
-python benchmark/run_benchmark.py         # pipeline benchmark
+python -m pytest -v                                                              # correctness suite
+python pipeline/01_batch_train.py --config config/pipeline_config_colab.yaml     # 5-year train + 2024 ablation (Colab)
+python pipeline/04_error_analysis.py --config config/pipeline_config_colab.yaml  # 2024 error tables
+python benchmark/run_benchmark.py --config config/pipeline_config_colab.yaml     # pipeline benchmark
 ```
