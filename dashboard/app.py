@@ -277,7 +277,7 @@ def render_fleet_map(flights_df: pd.DataFrame):
             paper_bgcolor="#0d1117", font_color="white",
             height=450, margin=dict(l=0, r=0, t=0, b=0),
         )
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, width='stretch')
 
     col1, col2, col3 = st.columns(3)
     with col1:
@@ -347,7 +347,7 @@ def render_hub_pressure(congestion_df: pd.DataFrame):
             title="Inbound Flight Volume",
         )
         fig.update_layout(height=350, paper_bgcolor="rgba(0,0,0,0)")
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, width='stretch')
 
     with col2:
         fig2 = px.bar(
@@ -358,6 +358,185 @@ def render_hub_pressure(congestion_df: pd.DataFrame):
         )
         fig2.update_layout(height=350, paper_bgcolor="rgba(0,0,0,0)")
         st.plotly_chart(fig2, use_container_width=True)
+
+
+ANALYTICS_COLS = [
+    "flight_id", "origin", "dest", "predicted_delta_delay", "is_high_risk",
+    "DestWindSpeed", "DestVisibility", "DestCeiling",
+]
+
+# (factor, column, bin edges, labels); the last bin is the "clear" reference.
+WEATHER_FACTORS = [
+    ("Visibility", "DestVisibility", [0, 1609.34, 4828.03, 8046.72, float("inf")],
+     ["<1 mi", "1–3 mi", "3–5 mi", ">5 mi"]),
+    ("Wind", "DestWindSpeed", [-1, 3, 6, 9, float("inf")],
+     ["<3 m/s", "3–6 m/s", "6–9 m/s", "≥9 m/s"]),
+    ("Ceiling", "DestCeiling", [0, 152.4, 304.8, 914.4, float("inf")],
+     ["<500 ft", "500–1k ft", "1k–3k ft", ">3k ft"]),
+]
+MIN_BUCKET_N = 30
+MIN_LANE_N = 20
+
+
+@st.cache_data(ttl=60)
+def read_gold_analytics(max_files: int = 400) -> pd.DataFrame:
+    """Wider slice of Gold predictions for the story charts (de-duplicated by flight_id)."""
+    import pyarrow.parquet as pq
+
+    cfg = load_config()
+    gold_path = resolve_path(cfg["paths"]["gold_predictions"])
+    if not gold_path.exists():
+        return pd.DataFrame()
+    frames = []
+    for pf in list_parquet_files(gold_path)[:max_files]:
+        try:
+            names = set(pq.read_schema(pf).names)
+            cols = [c for c in ANALYTICS_COLS if c in names]
+            frames.append(pd.read_parquet(pf, columns=cols))
+        except Exception:
+            pass
+    if not frames:
+        return pd.DataFrame()
+    df = pd.concat(frames, ignore_index=True)
+    if "flight_id" in df.columns:
+        df = df.drop_duplicates("flight_id")
+    return df
+
+
+def weather_impact_table(df: pd.DataFrame) -> pd.DataFrame:
+    """Avg predicted delta and high-risk share per weather bucket (long format)."""
+    rows = []
+    for factor, col, edges, labels in WEATHER_FACTORS:
+        if col not in df.columns:
+            continue
+        vals = pd.to_numeric(df[col], errors="coerce")
+        bucket = pd.cut(vals, bins=edges, labels=labels, right=False)
+        g = (df.assign(_b=bucket).dropna(subset=["_b"])
+             .groupby("_b", observed=True)
+             .agg(n=("predicted_delta_delay", "size"),
+                  avg_delta=("predicted_delta_delay", "mean"),
+                  high_risk_pct=("is_high_risk", lambda s: 100 * s.astype(float).mean()))
+             .reset_index().rename(columns={"_b": "bucket"}))
+        g["factor"] = factor
+        g["bucket"] = g["bucket"].astype(str)
+        rows.append(g)
+    if not rows:
+        return pd.DataFrame()
+    out = pd.concat(rows, ignore_index=True)
+    return out[out["n"] >= MIN_BUCKET_N]
+
+
+def weather_so_what(tbl: pd.DataFrame) -> str:
+    """One sentence: the weather factor with the biggest predicted-delay gap vs clear conditions."""
+    best = None
+    for factor, _col, _edges, labels in WEATHER_FACTORS:
+        sub = tbl[tbl["factor"] == factor].set_index("bucket")
+        if labels[-1] not in sub.index or len(sub) < 2:
+            continue
+        ref = sub.loc[labels[-1], "avg_delta"]
+        worst_label = (sub["avg_delta"] - ref).abs().idxmax()
+        gap = sub.loc[worst_label, "avg_delta"] - ref
+        if best is None or abs(gap) > abs(best[2]):
+            best = (factor, worst_label, gap, int(sub.loc[worst_label, "n"]))
+    if best is None:
+        return "Not enough flights per weather bucket yet to compare."
+    factor, label, gap, n = best
+    if abs(gap) < 0.5:
+        return (f"So what: weather barely moves the model's predicted delay in this slice "
+                f"(largest gap {gap:+.1f} min, {factor.lower()} {label}).")
+    direction = "later" if gap > 0 else "earlier"
+    return (f"So what: flights arriving with {factor.lower()} {label} are predicted "
+            f"{abs(gap):.1f} min {direction} than in clear conditions (n={n:,}).")
+
+
+def render_weather_impact(df: pd.DataFrame):
+    """Predicted delay by destination weather bucket."""
+    st.subheader("Weather Impact on Predicted Delay")
+    if df.empty or "predicted_delta_delay" not in df.columns:
+        st.info("No Gold predictions yet. Run the stream, then reload.")
+        return
+    tbl = weather_impact_table(df)
+    if tbl.empty:
+        st.info("Gold has no weather columns yet (or too few flights per bucket).")
+        return
+    order = {f: l for f, _c, _e, l in WEATHER_FACTORS}
+    fig = px.bar(
+        tbl, x="bucket", y="avg_delta", facet_col="factor", color="avg_delta",
+        color_continuous_scale="RdYlGn_r", color_continuous_midpoint=0,
+        hover_data={"n": ":,", "high_risk_pct": ":.1f", "avg_delta": ":.2f"},
+        labels={"bucket": "Destination weather at scheduled arrival",
+                "avg_delta": "Avg predicted Δ delay (min)"},
+        category_orders={"factor": [f for f, *_ in WEATHER_FACTORS if f in set(tbl["factor"])]},
+    )
+    fig.update_xaxes(matches=None, showticklabels=True)
+    for ann in fig.layout.annotations:
+        ann.text = ann.text.split("=")[-1]
+    fig.update_layout(height=380, paper_bgcolor="rgba(0,0,0,0)", coloraxis_showscale=False)
+    st.plotly_chart(fig, use_container_width=True)
+    st.caption(weather_so_what(tbl) +
+               "  Values are model predictions (arrival delay minus departure delay), not observed delays.")
+
+
+def lane_matrix(df: pd.DataFrame, top_n: int = 12):
+    """Origin x destination matrices of avg predicted delta and flight count."""
+    vol = pd.concat([df["origin"], df["dest"]]).value_counts()
+    hubs = vol.index[:top_n].tolist()
+    sub = df[df["origin"].isin(hubs) & df["dest"].isin(hubs)]
+    g = (sub.groupby(["origin", "dest"])
+         .agg(avg_delta=("predicted_delta_delay", "mean"), n=("predicted_delta_delay", "size"))
+         .reset_index())
+    g = g[g["n"] >= MIN_LANE_N]
+    z = g.pivot(index="origin", columns="dest", values="avg_delta").reindex(index=hubs, columns=hubs)
+    n = g.pivot(index="origin", columns="dest", values="n").reindex(index=hubs, columns=hubs)
+    return z, n, g
+
+
+def render_worst_lanes(df: pd.DataFrame):
+    """Heatmap of avg predicted delay by lane (origin x destination)."""
+    st.subheader("Worst Lanes")
+    if df.empty or not {"origin", "dest", "predicted_delta_delay"} <= set(df.columns):
+        st.info("No Gold predictions yet. Run the stream, then reload.")
+        return
+    z, n, g = lane_matrix(df)
+    if g.empty:
+        st.info(f"No lane has {MIN_LANE_N}+ flights yet.")
+        return
+    fig = go.Figure(go.Heatmap(
+        z=z.values, x=z.columns, y=z.index, customdata=n.values,
+        colorscale="RdYlGn_r", zmid=0,
+        colorbar=dict(title="Avg Δ (min)"),
+        hovertemplate="%{y} → %{x}<br>Avg predicted Δ: %{z:.1f} min<br>Flights: %{customdata:.0f}<extra></extra>",
+    ))
+    fig.update_layout(height=480, paper_bgcolor="rgba(0,0,0,0)",
+                      xaxis_title="Destination", yaxis_title="Origin", yaxis_autorange="reversed")
+    st.plotly_chart(fig, use_container_width=True)
+    worst = g.sort_values("avg_delta", ascending=False).iloc[0]
+    if worst["avg_delta"] < 0:
+        effect = (f"is the lane predicted to make up the least time "
+                  f"({abs(worst['avg_delta']):.1f} min better than departure delay)")
+    else:
+        effect = f"is the worst lane, predicted {worst['avg_delta']:.1f} min worse than departure delay"
+    st.caption(
+        f"So what: {worst['origin']} → {worst['dest']} {effect} over {int(worst['n']):,} flights. "
+        f"Lanes with fewer than {MIN_LANE_N} flights are left blank. Predictions, not observed delays."
+    )
+    with st.expander("Top 5 worst lanes"):
+        top = g.sort_values("avg_delta", ascending=False).head(5).round({"avg_delta": 1})
+        st.dataframe(top.rename(columns={"avg_delta": "avg_predicted_delta_min", "n": "flights"}),
+                     hide_index=True)
+
+
+def benchmark_headline(agg: pd.DataFrame) -> str:
+    """One sentence built only from measured numbers in the benchmark table."""
+    best = agg.loc[agg["avg_throughput"].idxmax()]
+    parts = [
+        f"Across {len(agg)} configurations, the best ({best['config']}) sustained "
+        f"{best['avg_throughput']:,.0f} records/s with p95 batch time {best['p95_batch_ms']:,.0f} ms"
+    ]
+    if pd.notna(best.get("p95_latency_ms")):
+        parts.append(f"and median p95 end-to-end latency {best['p95_latency_ms']:,.0f} ms")
+    parts.append(f"(mean across configs: {agg['avg_throughput'].mean():,.0f} records/s).")
+    return " ".join(parts)
 
 
 def render_system_health(benchmark_df: pd.DataFrame):
@@ -422,6 +601,8 @@ def render_benchmark(benchmark_df: pd.DataFrame):
         .reset_index()
     )
 
+    st.caption(benchmark_headline(agg))
+
     col1, col2 = st.columns(2)
     with col1:
         fig = px.bar(
@@ -432,7 +613,7 @@ def render_benchmark(benchmark_df: pd.DataFrame):
         )
         fig.update_xaxes(tickangle=45)
         fig.update_layout(height=400, paper_bgcolor="rgba(0,0,0,0)")
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, width='stretch')
 
     with col2:
         fig2 = px.scatter(
@@ -502,6 +683,11 @@ def main():
         render_fleet_map(flights_df)
         st.divider()
         render_hub_pressure(congestion_df)
+        st.divider()
+        analytics_df = read_gold_analytics()
+        render_weather_impact(analytics_df)
+        st.divider()
+        render_worst_lanes(analytics_df)
         st.divider()
         render_system_health(benchmark_df)
         st.divider()

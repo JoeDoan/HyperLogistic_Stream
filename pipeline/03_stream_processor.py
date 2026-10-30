@@ -26,6 +26,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import yaml
+from py4j.protocol import Py4JError
 from pyspark.ml import PipelineModel
 from pyspark.sql import SparkSession
 from pyspark.sql import functions as F
@@ -536,7 +537,8 @@ def run_streaming_pipeline(
             print(f"[STREAM] Test mode completed {len(metrics_logger.records)} batches. Stopping.")
         else:
             spark.streams.awaitAnyTermination()
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, Py4JError):
+        # SIGINT while blocked in awaitAnyTermination surfaces as Py4JError, not KeyboardInterrupt
         print("\n[STREAM] Shutdown signal received.")
     finally:
         try:
