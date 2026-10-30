@@ -259,6 +259,7 @@ def run_streaming_pipeline(
     test_mode: bool = False,
     reset: bool = False,
     dedupe: bool = True,
+    starting_offsets: str = "earliest",
 ):
     noaa_dir = resolve_path(cfg["paths"], "raw_noaa")
     models_dir = resolve_path(cfg["paths"], "models")
@@ -293,7 +294,7 @@ def run_streaming_pipeline(
         .format("kafka")
         .option("kafka.bootstrap.servers", bootstrap_servers)
         .option("subscribe", topic)
-        .option("startingOffsets", "latest")
+        .option("startingOffsets", starting_offsets)
         .option("maxOffsetsPerTrigger", str(max_offsets))
         .option("failOnDataLoss", "false")
         .load()
@@ -446,6 +447,8 @@ def run_streaming_pipeline(
         try:
             emit_rows = df.select("emit_epoch_ms").collect()
             count = len(emit_rows)
+            if count == 0:
+                print(f"  [Batch {batch_id:4d}] 0 rows after parse/filter")
             if count > 0:
                 out = df
                 if dedupe:
@@ -560,6 +563,9 @@ def main():
                         help="Stop after 4 batches or 60s (for quick validation)")
     parser.add_argument("--benchmark-label", type=str, default=None,
                         help="Label for benchmark metrics output file")
+    parser.add_argument("--starting-offsets", type=str, default="latest",
+                        choices=["latest", "earliest"],
+                        help="Kafka startingOffsets; use earliest to pick up rows produced before start")
     parser.add_argument("--reset", action="store_true",
                         help="Delete Bronze/Silver/Gold/checkpoints before starting (clean replay)")
     parser.add_argument("--output-root", type=str, default=None,
@@ -604,6 +610,7 @@ def main():
         test_mode=args.test,
         reset=args.reset,
         dedupe=not args.no_dedupe,
+        starting_offsets=args.starting_offsets,
     )
 
     spark.stop()
