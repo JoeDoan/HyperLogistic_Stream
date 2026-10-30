@@ -2,6 +2,8 @@
 
 **Real-Time Hub-to-Hub Logistics ETA Prediction with Kafka and Spark Structured Streaming**
 
+[![CI](https://github.com/mosomo82/HyperLogistic_Stream/actions/workflows/ci.yml/badge.svg?branch=feat/tony-pipeline)](https://github.com/mosomo82/HyperLogistic_Stream/actions/workflows/ci.yml)
+
 | | |
 |---|---|
 | **Course** | COMP-SCI 5540 Principles of Big Data Management (Fall 2026) |
@@ -18,8 +20,10 @@
 5. [Repository Structure](#5-repository-structure)
 6. [Exploratory Data Analysis](#6-exploratory-data-analysis)
 7. [Research Questions](#7-research-questions--evaluation-matrix)
-8. [Troubleshooting](#8-troubleshooting)
-9. [License & Academic Integrity](#9-license--academic-integrity)
+8. [Results](#8-results)
+9. [Testing](#9-testing)
+10. [Troubleshooting](#10-troubleshooting)
+11. [License & Academic Integrity](#11-license--academic-integrity)
 
 ---
 
@@ -104,15 +108,16 @@ Run from the project root. Start Kafka first (`docker compose up -d`).
 
 | Step | Command | Purpose |
 |---|---|---|
-| 1. Train | `python pipeline/01_batch_train.py` | Train models on 2022-2023 (`--skip-rf` to save time) |
+| 1. Train | `python pipeline/01_batch_train.py` | Train models, run the weather ablation, build the baseline table (years from the config; `--skip-rf` to save time; long, use Colab) |
 | 2. Replay producer | `python pipeline/02_kafka_producer.py --rate 1000` | Replay 2024 trips into Kafka (`--limit`, `--loop`) |
 | 3. Replay processor | `python pipeline/03_stream_processor.py` | Score and write Gold tables (`--reset`, `--test`, `--cores`, `--shuffle-partitions`) |
 | 4. Live producer | `python live/live_producer.py --record` | FAA + weather + OpenSky to Kafka (`--no-opensky`, `--dry-run`, `--once`) |
 | 5. Live processor | `python pipeline/04_live_processor.py` | Live Spark stream (`--reset`, `--test`) |
 | 6. API | `uvicorn api.main:app --port 8000` | REST endpoints for hub congestion |
-| 7. Dashboard | `streamlit run dashboard/app.py` | Live Radar and Replay & Benchmark |
+| 7. Dashboard | `streamlit run dashboard/app.py` | Live Radar, Replay & Benchmark, Model Insights |
 | 8. Benchmark | `python benchmark/run_benchmark.py --quick` | RQ2 grid (`--quick` = reduced grid) |
 | 9. Analyze | `python benchmark/analyze_results.py` | Benchmark charts and summary |
+| 10. Error analysis | `python pipeline/04_error_analysis.py --config config/pipeline_config_colab.yaml` | Per-hub, hour, month and delay-bucket error tables for the Model Insights tab |
 
 Defaults live in [`config/pipeline_config.yaml`](config/pipeline_config.yaml). Override with `--config <path>` or `HYPERLOGISTICS_CONFIG`.
 
@@ -133,16 +138,20 @@ HyperLogistic_Stream/
 │   ├── 01_batch_train.py       # Spark MLlib training
 │   ├── 02_kafka_producer.py    # Historical replay producer
 │   ├── 03_stream_processor.py  # Structured Streaming -> Gold
-│   └── 04_live_processor.py    # Live-topic Spark processor
+│   ├── 04_live_processor.py    # Live-topic Spark processor
+│   └── 04_error_analysis.py    # Error tables for the served model
 ├── live/                       # live_producer.py, fetch_opensky.py,
 │                               # fetch_faa_nas.py, fetch_nws_weather.py
 ├── api/main.py                 # FastAPI service
 ├── dashboard/                  # app.py, live_radar.py (Streamlit)
 ├── benchmark/                  # run_benchmark.py, analyze_results.py, results/
 ├── notebooks/                  # EDA and Colab pipeline notebooks
-├── models/                     # Trained models and metrics
+├── models/                     # Trained models, ablation.csv, baseline and error tables
+├── tests/                      # pytest suite (run by CI)
+├── .github/workflows/ci.yml    # CI: pytest on every push
 ├── reports/figures/            # EDA plots
 ├── docs/                       # Midterm/ and Phase 2/ (plans, run steps)
+├── EVALUATION.md               # Model, ablation, error-analysis and benchmark results
 ├── PIPELINE_SPECIFICATION.md   # Full architecture specification
 └── CS5540_HyperLogistics_Project_Summary.md
 ```
@@ -176,7 +185,34 @@ The EDA script filters cancelled/diverted trips, converts local times to UTC, cl
 
 ---
 
-## 8. Troubleshooting
+## 8. Results
+
+Full tables, method and limits are in [`EVALUATION.md`](EVALUATION.md). Headlines:
+
+| Question | Result |
+|---|---|
+| **RQ1:** better than baselines? | Yes, modestly. Validation MAE on 2024 is **10.53 min**, against 12.75 for "no change" and 10.80 for the lane mean (17% and 2.5% better). |
+| Does weather help? | A little: **1.0%** lower MAE with destination and origin weather. Lane and schedule features do most of the work. |
+| Where is the model wrong? | It beats "no change" mainly on flights that arrive early. Flights that end up more than 15 min late are under-predicted by about 34 min, so it is not a severe-delay warning tool. |
+| **RQ2:** how fast? | Best of 12 configurations: about **4,450 records/s** (4 cores, 8 shuffle partitions, 5k events/s producer, 20k max offsets). 4 cores beat 2 by about 22%. Shuffle partitions made no clear difference. |
+| Repeat-safe writes? | Yes. Replaying the same batch adds 0 rows to Gold (tested on real Spark). |
+
+The benchmark is provisional (4 batches per configuration, one run each), and end-to-end latency includes Kafka backlog time. Predictions on the dashboard are model outputs, not observed delays.
+
+---
+
+## 9. Testing
+
+```bash
+pip install pytest pandas numpy pyyaml pyarrow streamlit plotly pyspark==3.5.1
+python -m pytest -v
+```
+
+Covers output isolation and `--reset` safety, config consistency, the dashboard's story helpers, error-analysis aggregation, and repeat-safe Gold writes. The Spark tests need Java and Python 3.11 or older (pyspark 3.5 imports `distutils`), and two of them skip on Windows without Hadoop's `winutils`. CI runs the same suite on every push.
+
+---
+
+## 10. Troubleshooting
 
 | Symptom | Fix |
 |---|---|
@@ -188,6 +224,6 @@ The EDA script filters cancelled/diverted trips, converts local times to UTC, cl
 
 ---
 
-## 9. License & Academic Integrity
+## 11. License & Academic Integrity
 
 Developed as coursework for COMP-SCI 5540 Principles of Big Data Management at UMKC. All code and reports follow institutional honor codes and academic integrity standards.
