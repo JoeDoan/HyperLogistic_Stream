@@ -14,6 +14,7 @@ Run after 01_batch_train.py (needs models/gbt_pipeline_v1 and models/lane_mean.p
 """
 import argparse
 import importlib.util
+import json
 import sys
 from pathlib import Path
 
@@ -70,6 +71,15 @@ def main():
     models_dir = bt.resolve_path(cfg["paths"], "models")
     airports = cfg.get("airports", bt.AIRPORT_TZ)
     val_year = cfg["training"]["val_year"]
+
+    metrics_file = models_dir / "training_metrics.json"
+    if metrics_file.exists():
+        trained_on = json.loads(metrics_file.read_text()).get("train_years", [])
+        print(f"[ERR] Model trained on {trained_on}; scoring {val_year}")
+        if val_year in trained_on:
+            sys.exit(f"[ERR] val_year {val_year} is in the model's training years: that would score "
+                     f"in-sample data. Pass the config used for training (e.g. "
+                     f"--config config/pipeline_config_colab.yaml).")
 
     spark = bt.build_spark(cores=args.cores)
     flights = bt.add_utc_timestamps(

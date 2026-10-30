@@ -10,6 +10,7 @@
 |---|---|---|
 | Does the model predict delay change better than simple baselines? | `models/ablation.csv` | 2 |
 | Do weather features help? | same ablation | 3 |
+| Where is the model wrong? | `models/error_by_*.csv` | 3.1 |
 | How fast is the streaming pipeline, and what drives it? | `benchmark/results/` | 4 |
 | Are Gold writes repeat-safe? | `tests/test_dedupe_spark.py` | 5 |
 | What can we **not** claim? | | 6 |
@@ -61,6 +62,58 @@ reliable number and the importances as descriptive only.
 The dashboard's Weather-Impact chart (Replay tab) shows the model's *predicted* delay by weather
 bucket. It describes what the model learned, not observed delays.
 
+### 3.1 Error analysis: where the model is wrong
+
+`pipeline/04_error_analysis.py` scores the served full-weather GBT on the 2024 validation flights
+(1,665,362, the same set as section 2) and writes `models/error_by_*.csv`. Weighted over all
+hubs, its MAE is 10.53 min, matching `training_metrics.json`. The model never trained on 2024.
+
+**By origin hub** (24 hubs; MAE in minutes):
+
+| | Hub | GBT MAE | Lane-mean MAE | No-change MAE |
+|---|---|---|---|---|
+| Worst | JFK | 14.02 | 14.43 | 17.66 |
+| | EWR | 12.81 | 13.28 | 15.81 |
+| | BOS | 12.11 | 12.43 | 15.04 |
+| Best | ATL | 9.20 | 9.25 | 10.72 |
+| | PHX | 8.88 | 9.01 | 10.93 |
+
+- Northeast hubs are hardest to predict. JFK's error is about 58% higher than PHX's.
+- The GBT beats the lane-mean baseline at **every** hub, but only by 0.05 min (ATL) to 0.50 min
+  (DEN). The model's edge over the baseline is small everywhere.
+
+**By actual outcome** (flights grouped by what really happened):
+
+| Actual delta delay | Flights | GBT MAE | No-change MAE | GBT bias |
+|---|---|---|---|---|
+| Early >15 min | 403,493 | 15.0 | 22.7 | +15.0 |
+| Early 5-15 min | 568,491 | 4.5 | 10.4 | +3.8 |
+| Within 5 min | 402,498 | 5.7 | 2.6 | -5.1 |
+| Late 5-15 min | 167,989 | 14.6 | 8.7 | -14.5 |
+| Late >15 min | 122,891 | 34.1 | 29.8 | -34.1 |
+
+(Bias is prediction minus actual; negative means the model predicted too little delay.)
+
+- **The model beats "no change" only on flights that arrive early.** On on-time and late flights,
+  predicting 0 is better. The overall 17% gain comes from the 58% of flights that make up time.
+- **Big delays are badly missed.** Flights that end up more than 15 min late are under-predicted by
+  34 min on average. The model predicts roughly a 4 min *gain* for them. It does not recognise a
+  bad day in advance.
+- This table groups by the outcome, so some of the bias is expected: any model that predicts toward
+  the average will look biased at the extremes. It still shows the model is not a delay-warning
+  tool in its current form.
+
+**By hour and season:**
+
+- Error is highest for departures around 22:00 to 00:00 UTC (MAE about 11.2 to 11.5) and lowest
+  around 09:00 to 10:00 UTC (9.2 to 9.6, on low volume).
+- Monthly MAE ranges from 9.3 (October) to 11.6 (January). Flights make up the least time in
+  May (average actual delta -4.2 min) and the most in October (-7.8 min).
+- The largest single month-hub bias is BOS in February (+5.9 min): the model expected less time
+  gained than winter flights actually made up.
+
+The dashboard's **Model Insights** tab shows these tables and the seasonality heatmap.
+
 ## 4. Pipeline benchmark
 
 12 configurations, 4 batches each, 48 batches in total. Config names read
@@ -111,19 +164,22 @@ two Gold-reading tests skip, and the pipeline falls back to batch-level dedupe.
 
 ## 6. Limits: what we cannot claim
 
-1. **Weather is a small effect here.** A 1.0% MAE gain is real in the ablation but too small
+1. **The model does not predict big delays.** Flights that end up more than 15 min late are
+   under-predicted by about 34 min, and on on-time and late flights "no change" scores better
+   (section 3.1). Use it for typical-case ETA adjustment, not to warn of severe delays.
+2. **Weather is a small effect here.** A 1.0% MAE gain is real in the ablation but too small
    to support a headline like "weather predicts delay". The honest sentence is "weather adds
    about 1%; lane and schedule do most of the work".
-2. **Small benchmark sample.** Each config has 4 batches and one run. Differences under roughly
+3. **Small benchmark sample.** Each config has 4 batches and one run. Differences under roughly
    20% (for example sp8 vs. sp64) should not be treated as real.
-3. **End-to-end latency is inflated.** The 6 to 13 second latencies include time records waited
+4. **End-to-end latency is inflated.** The 6 to 13 second latencies include time records waited
    in Kafka behind a backlog, not just processing time. Do not quote them as the pipeline's
    latency. Batch time (p95 of 3 to 5 seconds) is the cleaner measure.
-4. **The benchmark is provisional.** The reduced benchmark is planned to be re-run on
+5. **The benchmark is provisional.** The reduced benchmark is planned to be re-run on
    Mon Nov 2 with the final code. Treat this table as provisional until then.
-5. **Predictions, not observations.** Dashboard charts show model output (predicted
+6. **Predictions, not observations.** Dashboard charts show model output (predicted
    `delta_delay`), not measured delays.
-6. **Proxy data.** Results describe commercial flights. Applying them to freight is an
+7. **Proxy data.** Results describe commercial flights. Applying them to freight is an
    assumption.
 
 ## 7. Reproduce
@@ -131,5 +187,6 @@ two Gold-reading tests skip, and the pipeline falls back to batch-level dedupe.
 ```bash
 python -m pytest -v                       # tests (23)
 python pipeline/01_batch_train.py         # retrain; writes models/ablation.csv (long, use Colab)
+python pipeline/04_error_analysis.py --config config/pipeline_config_colab.yaml  # error tables
 python benchmark/run_benchmark.py         # pipeline benchmark
 ```
