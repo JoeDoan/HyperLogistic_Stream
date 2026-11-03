@@ -462,12 +462,27 @@ def _render_map(hubs: pd.DataFrame):
         hovertext=hover, hoverinfo="text",
     ))
     fig.update_layout(
-        geo=dict(scope="usa", showland=True, landcolor="#1a1a2e", bgcolor="#0d1117",
-                 showlakes=False, subunitcolor="#374151"),
-        paper_bgcolor="#0d1117", font_color="white", height=470,
+        dragmode=False,
+        geo=dict(
+            scope="usa",
+            projection_type="albers usa",
+            showland=True,
+            landcolor="#1a1a2e",
+            bgcolor="#0d1117",
+            showlakes=False,
+            showsubunits=True,
+            subunitcolor="#374151",
+        ),
+        paper_bgcolor="#0d1117",
+        font_color="white",
+        height=470,
         margin=dict(l=0, r=0, t=0, b=0),
     )
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(
+        fig,
+        use_container_width=True,
+        config={"scrollZoom": False, "displayModeBar": False},
+    )
     st.caption("Circle color = hub stress (weather severity + FAA severity). "
                "Circle size = aircraft within 100 km right now.")
 

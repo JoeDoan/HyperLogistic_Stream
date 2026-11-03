@@ -328,3 +328,32 @@ def test_canonical_benchmark_summary_and_config_forwarding(dash, tmp_path):
         stream_cmd = mock_run.call_args[0][0]
         assert stream_cmd[-2:] == ["--config", "config/pipeline_config_colab.yaml"]
 
+
+def test_build_fleet_map_figure_locks_usa_scope_and_vectorizes_routes(dash):
+    hubs = list(dash.HUB_COORDS.keys())
+    rows = []
+    for i in range(500):
+        origin = hubs[i % len(hubs)]
+        dest = hubs[(i * 7 + 1) % len(hubs)]
+        if origin == dest:
+            dest = hubs[(i + 2) % len(hubs)]
+        delta = -3.0 if i % 3 == 0 else (10.0 if i % 3 == 1 else 42.0)
+        rows.append({
+            "flight_id": f"FL_{i:04d}",
+            "origin": origin,
+            "dest": dest,
+            "dep_delay": float(i % 25),
+            "predicted_delta_delay": delta,
+            "is_high_risk": delta > 30.0,
+        })
+    flights_df = pd.DataFrame(rows)
+    fig = dash.build_fleet_map_figure(flights_df, dash.HUB_COORDS, 30.0)
+
+    assert fig.layout.dragmode is False
+    assert fig.layout.geo.scope == "usa"
+    assert fig.layout.geo.projection.type == "albers usa"
+    assert fig.layout.geo.showsubunits is True
+    assert len(fig.data) <= 5
+    assert len(fig.data) == 4
+
+
