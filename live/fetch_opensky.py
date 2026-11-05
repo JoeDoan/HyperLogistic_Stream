@@ -3,7 +3,7 @@ live/fetch_opensky.py
 Prototype: fetch live aircraft states over the continental US from OpenSky.
 
 NOTE: OpenSky returns POSITIONS, not delay minutes. Anonymous access is heavily
-rate-limited (a daily credit budget), so poll no faster than ~30 s and expect 429s.
+rate-limited (a daily credit budget), so poll no faster than ~120 s and expect 429s.
 If you have an OAuth2 token, export OPENSKY_TOKEN to raise your limits.
 
 Usage:

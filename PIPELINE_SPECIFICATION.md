@@ -17,7 +17,7 @@
 [ 2. DUAL INGESTION LAYER ]                                                                                        ▼
   (A) Historical Replay (pipeline/02_kafka_producer.py) ──► Kafka Topic: flights_stream (1k/5k/20k eps) ──┐
   (B) Live Multi-Source Feeds (live/live_producer.py)                                                     │
-      ├── OpenSky Network (Aircraft Positions)  ────────► Kafka Topic: live_flights (30s)                │
+      ├── OpenSky Network (Aircraft Positions)  ────────► Kafka Topic: live_flights (120s)               │
       ├── FAA NAS Status (Ground Stops & Delays) ────────► Kafka Topic: airport_status (60s)              │
       └── NWS API (METAR Surface Weather)        ────────► Kafka Topic: weather (300s)                   ├──► Apache Kafka
                                                                                                           │    (Port 9092 / 9094)
@@ -26,7 +26,7 @@
   (A) Replay Engine (pipeline/03_stream_processor.py) ◄───────────────────────────────────────────────────┤
       Broadcast Join with Static NOAA Table ──► VectorAssembler ──► MLlib .transform() ──► Gold Output    │
   (B) Live Processor (pipeline/04_live_processor.py) ◄────────────────────────────────────────────────────┘
-      Spatial Radius Join (Haversine km) ──► Multi-Topic Fusion ──► Live Hub Stress Table
+      Latest-Snapshot Haversine Join (km) ──► Multi-Topic Enrichment ──► Live Gold Tables
                                     │
                                     ▼
 [ 4. MEDALLION STORAGE LAYER (Snappy Parquet) ]
@@ -35,12 +35,12 @@
   └── Gold:
       ├── Scored dynamic predictions: data/gold/predictions/
       ├── Rolling window hub congestion: data/gold/hub_congestion/
-      └── Real-time live hub status: data/gold/live_hub_status/
+      └── Real-time live hub feeds: data/gold/live/{weather,airport_status,hub_traffic}/
                                     │
                                     ▼
 [ 5. SERVING, OBSERVABILITY & BENCHMARKS ]
   ├── FastAPI Microservice (api/main.py) ───────► REST Endpoints (/flights/active, /hubs/{hub}/congestion)
-  ├── Streamlit Dashboard (dashboard/app.py) ──► Tabs: Live Radar (live_radar.py) | Replay & Benchmark | Story
+  ├── Streamlit Dashboard (dashboard/app.py) ──► Tabs: Live Radar (live_radar.py) | Replay & Benchmark | Model Insights
   └── Benchmark Suite (benchmark/run_benchmark.py, analyze_results.py) ──► RQ2 Factorial Matrix & Plots
 ```
 
@@ -48,44 +48,43 @@
 
 ## 2. Phase 1: Offline Batch Pipeline (Data Preparation & Model Training)
 
-Implemented in [`pipeline/01_batch_train.py`](pipeline/01_batch_train.py).
+Implemented in [`pipeline/01_batch_train.py`](pipeline/01_batch_train.py) and evaluated per slice in [`pipeline/04_error_analysis.py`](pipeline/04_error_analysis.py).
 
-### 2.1. Raw Data Extraction (~11 GB Total)
-* **BTS Reporting Carrier On-Time Performance (2022–2023, ~6.5 GB):**
-  * Historical flight departure and arrival records for training.
-  * Year 2024 (~3.3 GB) is strictly held out as the streaming replay evaluation partition.
-* **NOAA Integrated Surface Database (ISD) (2022–2024, ~911 MB):**
-  * Hourly weather readings for destination airports (temperature, visibility, wind speed).
+### 2.1. Raw Data Extraction (20.55 GB Full Colab Corpus; ~11 GB Local 2022 to 2024 Slice)
+* **BTS Reporting Carrier On-Time Performance (2018, 2019, 2021, 2022, 2023 train; 2024 holdout, 18.63 GB across 72 monthly CSVs on Colab):**
+  * Historical flight departure and arrival records for 24 US hubs (`7,996,449` training flights; year 2020 excluded due to COVID traffic collapse).
+  * Year 2024 (`1,665,362` flights, `3.20 GB`) is held out for model evaluation and Kafka streaming replay.
+* **NOAA Integrated Surface Database (ISD) (2018 to 2024 excluding 2020, 1.90 GB across 240 station-year CSVs):**
+  * Hourly surface readings for all 24 tracked hubs (wind speed, visibility, air temperature, and cloud ceiling).
 
 ### 2.2. Cleaning & Standardization
+* Pin Spark SQL session timezone to `UTC` (`spark.sql.session.timeZone = UTC`) across batch, streaming, and live jobs so timestamp truncation and hour features remain identical on Linux, macOS, and Windows.
 * Filter cancelled and diverted flights (`Cancelled == 0`, `Diverted == 0`).
-* Convert local wall-clock times (`FlightDate`, `CRSDepTime`, `WheelsOff`, `CRSArrTime`) to universal UTC timestamps using airport IANA timezone mappings.
+* Convert local wall-clock times (`FlightDate`, `CRSDepTime`, `WheelsOff`, `CRSArrTime`) to universal UTC timestamps using airport IANA timezone mappings while computing `DayOfWeek` consistently from local `FlightDate`.
 * Clean and extract numeric metrics from NOAA ISD compound strings:
-  * `WND`: Wind direction (degrees) and speed (converted to m/s).
-  * `VIS`: Visibility distance in meters.
-  * `TMP`: Air temperature in degrees Celsius.
+  * `WND`: Wind speed converted to m/s (`>= 9999` treated as missing).
+  * `VIS`: Visibility distance in meters (`>= 999999` treated as missing).
+  * `TMP`: Air temperature in degrees Celsius (`abs >= 9999` treated as missing).
+  * `CIG`: Cloud ceiling height in meters (`>= 99999` mapped to `22000.0` m clear sky).
 
-### 2.3. Feature Engineering & Formulation
+### 2.3. Feature Engineering & Formulation (14 Numeric Features)
 * **Target Label Formulation:**
   $$\Delta\text{delay} = \text{ArrDelay} - \text{DepDelay}$$
-  *Rationale:* Predicting delay change forces the model to learn airborne transit dynamics rather than trivial identity mappings.
+  *Rationale:* Predicting delay change forces the model to learn airborne transit and turnaround recovery dynamics rather than copying departure delay.
 * **Dynamic ETA Formulation:**
   $$\text{Predicted\_ETA} = \text{CRSArrTime} + \text{DepDelay} + \text{Predicted\_}\Delta\text{delay}$$
-* **Feature Vector ($X$):**
-  * `DepDelay`: Known departure delay at wheels-off.
-  * `Distance`: Great-circle distance between hub pairs.
-  * `DepHourUTC`, `ArrHourUTC`: Hour-of-day cyclics in UTC.
-  * `DayOfWeek`: Integer (1 to 7).
-  * `DestWindSpeed`, `DestVisibility`, `DestTemp`: Destination surface weather at scheduled arrival hour.
-  * `LaneMeanDelay`: 30-day historical rolling mean delay for the specific Origin-Destination lane.
+* **Feature Vector ($X$, 14 numeric columns):**
+  * Schedule and lane (6): `DepDelay`, `Distance`, `DepHourUTC`, `ArrHourUTC`, `DayOfWeek` (from local `FlightDate`), and `LaneMeanDelay` (historical Origin-Destination mean computed on training years only).
+  * Destination weather at scheduled arrival UTC hour (4): `DestWindSpeed`, `DestVisibility`, `DestTemp`, `DestCeiling` (joined on observed NOAA ISD at `sched_arr_hour_utc`, acting as an oracle forecast upper bound for arrival weather).
+  * Origin weather at wheels-off UTC hour (4): `OriginWindSpeed`, `OriginVisibility`, `OriginCeiling`, `OriginTemp`.
 
-### 2.4. Offline Model Training & Serialization
-* **Algorithms:** Spark MLlib `GBTRegressor` (primary) and `RandomForestRegressor` (baseline).
-* **Pipeline:** `StringIndexer` $\rightarrow$ `OneHotEncoder` $\rightarrow$ `VectorAssembler` $\rightarrow$ `GBTRegressor`.
-* **Evaluation:** Hold-out evaluation measuring MAE and RMSE against:
-  1. *Baseline 1:* Delay unchanged ($\Delta\text{delay} = 0$).
-  2. *Baseline 2:* Historical lane mean.
-* **Model Artifact:** Serialized `PipelineModel` stored in `models/gbt_pipeline_v1` (with metadata in `models/training_summary.json`).
+### 2.4. Offline Model Training, Ablation & Serialization
+* **Algorithms:** Spark MLlib `GBTRegressor` (primary) and `RandomForestRegressor` (comparison).
+* **Pipeline:** `VectorAssembler(handleInvalid="keep")` $\rightarrow$ `GBTRegressor` (or `RandomForestRegressor`).
+* **Evaluation:** Hold-out 2024 evaluation measuring MAE and RMSE across a 4-step weather ablation (`models/ablation.csv`) and two baselines:
+  1. *Baseline 1:* Delay unchanged ($\Delta\text{delay} = 0$, MAE `12.749` min).
+  2. *Baseline 2:* Historical training-years lane mean (MAE `10.799` min).
+* **Artifacts:** Serialized `PipelineModel` in `models/gbt_pipeline_v1`, metrics in `models/training_metrics.json`, ablation table in `models/ablation.csv`, hub-hour-weekday reference in `models/baseline_hub_hour_dow.csv`, and slice error tables in `models/error_by_*.csv`.
 
 ---
 
@@ -93,7 +92,7 @@ Implemented in [`pipeline/01_batch_train.py`](pipeline/01_batch_train.py).
 
 ### 3.1. Mode A: Historical Replay Producer
 Implemented in [`pipeline/02_kafka_producer.py`](pipeline/02_kafka_producer.py).
-* **Input Source:** Chronologically sorted BTS 2024 flight departure records.
+* **Input Source:** Chronologically sorted BTS 2024 flight departure records (`flight_id`, `flight_date`, `origin`, `dest`, UTC timestamps, `dep_delay`, `distance`, `emit_epoch_ms`).
 * **Replay Mechanics:** Emits events strictly aligned with historical `WheelsOff` milestone order.
 * **Throughput Throttling:** Configurable emission rates (1,000, 5,000, 20,000 events/second) via high-precision token bucket pacing.
 * **Target Topic:** `flights_stream` (8 partitions, key: `origin`).
@@ -101,12 +100,12 @@ Implemented in [`pipeline/02_kafka_producer.py`](pipeline/02_kafka_producer.py).
 ### 3.2. Mode B: Live Multi-Source Feed Producer (Plan V2)
 Implemented in [`live/live_producer.py`](live/live_producer.py).
 * Coordinates three real-time asynchronous fetchers:
-  1. **OpenSky Network** ([`live/fetch_opensky.py`](live/fetch_opensky.py)): Polled every 30 s for live transponder positions, altitudes, and headings across US airspace (`live_flights` topic). Includes exponential backoff for public rate-limit handling.
-  2. **FAA NAS Status** ([`live/fetch_faa_nas.py`](live/fetch_faa_nas.py)): Polled every 60 s for official airport ground stops, ground delay programs, and arrival closures (`airport_status` topic).
-  3. **NWS API** ([`live/fetch_nws_weather.py`](live/fetch_nws_weather.py)): Polled every 5 min for METAR surface observations (wind speed/gusts, visibility, cloud ceiling, temperature) for key hubs (`weather` topic).
+  1. **OpenSky Network** ([`live/fetch_opensky.py`](live/fetch_opensky.py)): Polled every 120 s by default for live transponder positions, altitudes, and vertical rates across US airspace (`live_flights` topic), honoring HTTP `429 Retry-After` headers to stay within anonymous daily credit budgets.
+  2. **FAA NAS Status** ([`live/fetch_faa_nas.py`](live/fetch_faa_nas.py)): Polled every 60 s for official airport ground stops, ground delay programs, and arrival or departure delays (`airport_status` topic).
+  3. **NWS API** ([`live/fetch_nws_weather.py`](live/fetch_nws_weather.py)): Polled every 5 min for METAR surface observations (wind speed and gusts, visibility, cloud ceiling, temperature) across all 24 hubs (`weather` topic).
 * **Resilience Safeguards:**
-  * **Stale-Data Fallback:** Automatically caches last-known values with freshness timestamps and flags stale feeds on the dashboard.
-  * **Recorded Session:** Supports `--record` flag to save streaming sessions to JSONL for offline demo replay.
+  * **Stale-Data Fallback & Sink Isolation:** Decouples HTTP fetch errors from Kafka publish errors, re-publishing last-known FAA and weather rows with `stale=true` so feed outages trigger a `STALE` badge without terminating producer threads.
+  * **Recorded Session & Sample Fallback:** Supports `--record` to save sessions to `data/live_recordings/*.jsonl`, with a committed snapshot in `data/sample/` so fresh clones render the Live Radar tab without Kafka or Spark.
 
 ### 3.3. Kafka Broker Configuration
 * Defined in [`docker-compose.yml`](docker-compose.yml):
@@ -121,20 +120,18 @@ Implemented in [`live/live_producer.py`](live/live_producer.py).
 
 ### 4.1. Replay Stream Processor
 Implemented in [`pipeline/03_stream_processor.py`](pipeline/03_stream_processor.py).
-* **Stream Ingestion:** Ingests from `flights_stream` with static schema enforcement.
-* **Stream-to-Static Join:** Broadcast joins streaming flights with preloaded NOAA ISD destination weather table on `(dest, scheduled_arr_hour_utc)`.
-* **ML Inference:** Driver loads `gbt_pipeline_v1` and applies distributed `.transform()` scoring in micro-batches.
-* **Sliding Window Aggregation:** Computes 1-hour tumbling/sliding arrival pressure windows per destination hub:
-  * `inbound_count = count(flight_id)`
-  * `avg_predicted_delta = avg(predicted_delta_delay)`
-  * `high_risk_count = count_if(predicted_delta_delay > 5.0)`
-* **Execution Flags:** Supports `--reset` (cleans checkpoints and outputs for deterministic reruns) and `--benchmark-label`.
+* **Stream Ingestion:** Ingests from `flights_stream` with static schema enforcement (`FLIGHT_SCHEMA`, including `flight_date`).
+* **Stream-to-Static Joins:** Broadcast joins streaming flights twice against preloaded 2024 NOAA ISD weather (`(dest_icao, sched_arr_hour_utc)` and `(origin_icao, wheels_off_hour_utc)`) and once against `models/lane_mean.parquet`.
+* **ML Inference Guard:** Loads `models/gbt_pipeline_v1` and fails fast if absent unless `--allow-dummy-model` is explicitly passed (tagging Gold rows with `is_fallback_prediction`).
+* **Repeat-Safe Deduplication:** `dedupe_batch` drops duplicate `flight_id` records within each micro-batch and anti-joins against existing Gold Parquet files.
+* **Sliding Window Aggregation:** Computes 1-hour sliding arrival pressure windows (15-minute slide) per destination hub using the configured `high_risk_threshold_min` (`5.0` min on Colab, `30.0` min local).
+* **Execution Flags:** Supports `--reset` (validated against `PROJECT_ROOT` and configured Medallion or `--output-root` paths), `--output-root`, `--no-dedupe`, and `--benchmark-label`.
 
 ### 4.2. Live Stream Processor
 Implemented in [`pipeline/04_live_processor.py`](pipeline/04_live_processor.py).
-* **Multi-Topic Consumer:** Ingests `live_flights`, `airport_status`, and `weather` streams concurrently.
-* **Spatial Hub Attribution:** Uses Haversine distance calculations to associate airborne transponder positions within a configurable radius (e.g., 100 km) of major hubs.
-* **Live Feature Enrichment:** Fuses current FAA delay statuses with real-time METAR weather to compute active hub congestion scores.
+* **Multi-Topic Consumer:** Ingests `live_flights`, `airport_status`, and `weather` streams concurrently without invoking the GBT model.
+* **Latest-Snapshot Spatial Hub Attribution:** Filters each `live_flights` micro-batch to the latest `fetched_at` poll, deduplicates `icao24`, and left-joins Haversine proximity counts (`<= 100` km) across all 24 hubs so multi-poll batches never double-count aircraft and zero-traffic hubs refresh cleanly.
+* **Live Feature Enrichment:** Classifies METAR flight categories (`VFR`, `MVFR`, `IFR`, `LIFR`), scores FAA delay severity (`0` to `3`), and joins historical hub-hour-weekday baselines (`models/baseline_hub_hour_dow.parquet` or `.csv`).
 
 ---
 
@@ -144,11 +141,11 @@ Stream sinks write to Parquet format with Snappy compression and structured chec
 
 | Layer | Directory Path | Purpose | Update Strategy |
 |:---|:---|:---|:---|
-| **Bronze** | `data/bronze/flights_raw/` | Raw ingested Kafka payload dump with checkpointing | Append-only partitioned by date |
-| **Silver** | `data/silver/flights_enriched/` | Cleaned records joined with weather and lane baselines | Partitioned by date and origin hub |
-| **Gold Predictions** | `data/gold/predictions/` | Dynamic ETA predictions for active airborne flights | Fast micro-batch append |
-| **Gold Congestion** | `data/gold/hub_congestion/` | 1-hour windowed arrival pressure metrics per hub | Windowed rollup partitions |
-| **Gold Live Status** | `data/gold/live_hub_status/` | Real-time live hub stress metrics (Plan V2) | Micro-batch overwrite |
+| **Bronze** | `data/bronze/flights_raw/` | Raw ingested Kafka payload dump with checkpointing | Append-only partitioned by `ingest_date` |
+| **Silver** | `data/silver/flights_enriched/` | Cleaned records joined with origin/destination weather and lane baselines | Append-only partitioned by `enrich_date` |
+| **Gold Predictions** | `data/gold/predictions/` | Repeat-safe ETA predictions for replayed 2024 flights | Deduplicated micro-batch append |
+| **Gold Congestion** | `data/gold/hub_congestion/` | 1-hour windowed arrival pressure metrics per hub | Windowed micro-batch append |
+| **Gold Live Feeds** | `data/gold/live/{weather,airport_status,hub_traffic}/` | Real-time live hub weather, FAA status, and nearby aircraft counts | Partitioned by `gold_date` |
 
 ---
 

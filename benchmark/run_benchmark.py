@@ -80,7 +80,13 @@ def grid_configs(cfg: dict, quick: bool = False) -> list[dict]:
     return configs
 
 
-def start_producer(bootstrap: str, topic: str, rate: int, limit: int = 50000) -> subprocess.Popen:
+def start_producer(
+    bootstrap: str,
+    topic: str,
+    rate: int,
+    limit: int = 50000,
+    config_path: str | None = None,
+) -> subprocess.Popen:
     """Start Kafka producer subprocess in loop mode so emission continues throughout Spark startup."""
     cmd = [
         sys.executable,
@@ -91,6 +97,8 @@ def start_producer(bootstrap: str, topic: str, rate: int, limit: int = 50000) ->
         "--topic", topic,
         "--loop",
     ]
+    if config_path:
+        cmd.extend(["--config", config_path])
     proc = subprocess.Popen(
         cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
         text=True, bufsize=1
@@ -124,6 +132,7 @@ def run_streaming_job(
     warmup_batches: int = 3,
     measure_batches: int = 10,
     bootstrap: str = None,
+    config_path: str | None = None,
 ) -> dict:
     """Run the Spark streaming job as subprocess, parse metrics output."""
     bootstrap = bootstrap or cfg["kafka"]["bootstrap_servers"]
@@ -143,6 +152,8 @@ def run_streaming_job(
         "--test",
         "--bootstrap", bootstrap,
     ]
+    if config_path:
+        cmd.extend(["--config", config_path])
 
     print(f"\n[BENCH] Launching Spark streaming: {label}")
     print(f"  Cmd: {' '.join(cmd)}")
@@ -302,6 +313,7 @@ def main():
             topic=topic,
             rate=config["ingestion_rate"],
             limit=200000,
+            config_path=args.config,
         )
         drain_proc_output(
             producer_proc,
@@ -323,6 +335,7 @@ def main():
             warmup_batches=cfg["benchmark"]["warmup_batches"],
             measure_batches=cfg["benchmark"]["measure_batches"],
             bootstrap=bootstrap,
+            config_path=args.config,
         )
         result["ingestion_rate"] = config["ingestion_rate"]
         all_results.append(result)
