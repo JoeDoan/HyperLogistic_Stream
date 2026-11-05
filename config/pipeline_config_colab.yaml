@@ -1,3 +1,9 @@
+# HyperLogistics-Stream Pipeline Configuration — Google Colab Pro
+# Paths assume Google Drive mounted at /content/drive/MyDrive/HyperLogistics
+# Change COLAB_ROOT below to match your Drive folder name.
+
+# NOTE: Bootstrap uses localhost:9092 (Kafka binary, no Docker)
+
 kafka:
   bootstrap_servers: "localhost:9092"
   topic: "flights_stream"
@@ -12,12 +18,15 @@ paths:
   gold_predictions: "/content/drive/MyDrive/HyperLogistics/data/gold/predictions"
   gold_congestion: "/content/drive/MyDrive/HyperLogistics/data/gold/hub_congestion"
   models: "/content/drive/MyDrive/HyperLogistics/models"
-  checkpoints: "/content/checkpoints"
+  checkpoints: "/content/checkpoints"          # local — checkpoints don't need to persist
   benchmark_results: "/content/drive/MyDrive/HyperLogistics/benchmark/results"
 
+spark:
+  driver_memory: "16g"              # Colab Pro High-RAM has ~50 GB; local mode runs everything in the driver JVM
+
 training:
-  train_years: [2018, 2019, 2021, 2022]
-  val_year: 2023
+  train_years: [2018, 2019, 2021, 2022, 2023]   # 2020 excluded (COVID traffic collapse)
+  val_year: 2024                                 # holdout test year, same year the producer replays
   stream_year: 2024
   gbt_max_iter: 50
   gbt_max_depth: 5
@@ -34,7 +43,13 @@ features:
     - DestWindSpeed
     - DestVisibility
     - DestTemp
+    - DestCeiling
+    - OriginWindSpeed
+    - OriginVisibility
+    - OriginCeiling
+    - OriginTemp
     - LaneMeanDelay
+  categorical: []
   label: "delta_delay"
 
 airports:
@@ -68,12 +83,12 @@ producer:
   burst_rates: [1000, 5000, 20000]
 
 streaming:
-  trigger_interval_sec: 5
+  trigger_interval_sec: 5           # slightly longer trigger for Colab I/O
   max_offsets_per_trigger: 5000
   window_duration: "1 hour"
   slide_duration: "15 minutes"
-  watermark_delay: "10 minutes"
-  high_risk_threshold_min: 30.0
+  watermark_delay: "6 hours"
+  high_risk_threshold_min: 5.0
 
 benchmark:
   cores: [2, 4, 8]
@@ -81,5 +96,5 @@ benchmark:
   ingestion_rates: [1000, 5000, 20000]
   max_offsets: [5000, 20000, 100000]
   runs_per_config: 1
-  warmup_batches: 3
+  warmup_batches: 1                 # --test stops after 4 batches, so 3 are measured
   measure_batches: 10

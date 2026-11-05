@@ -34,12 +34,13 @@ DEFAULT_AIRPORTS = [
 
 def download_file(url: str, dest_path: Path):
     """Download a file with progress bar."""
+    tmp_path = dest_path.with_name(dest_path.name + ".part")
     req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
     with urllib.request.urlopen(req, timeout=30) as response:
         total_size = int(response.headers.get("Content-Length", 0))
         block_size = 1024 * 512
 
-        with open(dest_path, "wb") as f, tqdm(
+        with open(tmp_path, "wb") as f, tqdm(
             desc=dest_path.name,
             total=total_size,
             unit="iB",
@@ -53,6 +54,12 @@ def download_file(url: str, dest_path: Path):
                     break
                 f.write(chunk)
                 bar.update(len(chunk))
+
+    received = tmp_path.stat().st_size
+    if total_size and received != total_size:
+        tmp_path.unlink()
+        raise IOError(f"Incomplete download: got {received} of {total_size} bytes")
+    tmp_path.replace(dest_path)
 
 def get_station_mapping(history_csv_path: Path, target_icaos: set):
     """Parse isd-history.csv and return mapping: icao -> (usaf, wban, name)."""

@@ -1,5 +1,8 @@
+# HyperLogistics-Stream Pipeline Configuration
+# Course: COMP-SCI 5540, UMKC Fall 2026
+
 kafka:
-  bootstrap_servers: "localhost:9092"
+  bootstrap_servers: "localhost:9094"
   topic: "flights_stream"
   partitions: 8
   consumer_group: "hyperlogistics-spark-consumer"
@@ -16,7 +19,7 @@ paths:
   benchmark_results: "benchmark/results"
 
 training:
-  train_years: [2018, 2019, 2021, 2022]
+  train_years: [2022]                      # matches 2022-2024 dataset on disk
   val_year: 2023
   stream_year: 2024
   gbt_max_iter: 50
@@ -34,10 +37,17 @@ features:
     - DestWindSpeed
     - DestVisibility
     - DestTemp
+    - DestCeiling
+    - OriginWindSpeed
+    - OriginVisibility
+    - OriginCeiling
+    - OriginTemp
     - LaneMeanDelay
+  categorical: []
   label: "delta_delay"
 
 airports:
+  # IATA -> IANA timezone
   ATL: "America/New_York"
   ORD: "America/Chicago"
   DFW: "America/Chicago"
@@ -64,7 +74,7 @@ airports:
   MCO: "America/New_York"
 
 producer:
-  default_rate_eps: 1000
+  default_rate_eps: 1000       # events per second
   burst_rates: [1000, 5000, 20000]
 
 streaming:
@@ -72,7 +82,7 @@ streaming:
   max_offsets_per_trigger: 5000
   window_duration: "1 hour"
   slide_duration: "15 minutes"
-  watermark_delay: "10 minutes"
+  watermark_delay: "6 hours"
   high_risk_threshold_min: 30.0
 
 benchmark:
