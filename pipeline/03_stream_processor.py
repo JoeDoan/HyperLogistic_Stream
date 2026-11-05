@@ -39,6 +39,7 @@ CONFIG_PATH = PROJECT_ROOT / "config" / "pipeline_config.yaml"
 
 FLIGHT_SCHEMA = StructType([
     StructField("flight_id", StringType(), True),
+    StructField("flight_date", StringType(), True),
     StructField("tail_number", StringType(), True),
     StructField("carrier", StringType(), True),
     StructField("origin", StringType(), True),
@@ -85,6 +86,7 @@ def build_spark(cores: int, shuffle_partitions: int, app_name: str = "HyperLogis
         .master(core_str)
         .config("spark.jars.packages", "org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.0")
         .config("spark.scheduler.mode", "FAIR")
+        .config("spark.sql.session.timeZone", "UTC")
         .config("spark.sql.shuffle.partitions", str(shuffle_partitions))
         .config("spark.sql.adaptive.enabled", "false")
         .config("spark.driver.memory", "4g")
@@ -179,18 +181,53 @@ def apply_output_root(cfg: dict, output_root: str) -> dict:
     return {**cfg, "paths": paths}
 
 
-def reset_outputs(targets: list):
+def _is_unsafe_reset_path(p: Path) -> bool:
+    resolved_project = PROJECT_ROOT.resolve()
+    return (
+        p == Path(p.anchor)
+        or p == Path.home().resolve()
+        or p == resolved_project
+        or p in resolved_project.parents
+        or len(p.parts) < 4
+    )
+
+
+def reset_outputs(targets: list, allowed_roots: list | None = None):
     """Delete Medallion outputs and checkpoints so a replay starts clean."""
     import shutil
-    for t in targets:
-        p = Path(t).resolve()
-        # Safety: only wipe directories that live inside the project
-        if PROJECT_ROOT not in p.parents:
-            print(f"[RESET] Refusing to delete outside project: {p}")
-            continue
+    resolved_project = PROJECT_ROOT.resolve()
+    resolved_roots = [Path(r).resolve() for r in (allowed_roots or [])]
+    resolved_targets = [Path(t).resolve() for t in targets]
+
+    for p in resolved_targets:
+        is_authorized = (
+            resolved_project in p.parents
+            or any(p == r or r in p.parents for r in resolved_roots)
+        )
+        if _is_unsafe_reset_path(p) or not is_authorized:
+            raise ValueError(f"Refusing unsafe or unauthorized reset target: {p}")
+
+    for p in resolved_targets:
         if p.exists():
-            shutil.rmtree(p, ignore_errors=True)
+            shutil.rmtree(p)
             print(f"[RESET] Removed {p}")
+
+
+def load_scoring_model(models_dir: str, allow_dummy_model: bool = False):
+    """Load the trained GBT PipelineModel or fail fast unless dummy fallback is explicitly opted in."""
+    gbt_model_path = Path(models_dir) / "gbt_pipeline_v1"
+    if not gbt_model_path.exists():
+        if not allow_dummy_model:
+            raise FileNotFoundError(
+                f"GBT model not found at {gbt_model_path}. "
+                "Run 'python pipeline/01_batch_train.py' first, or pass '--allow-dummy-model' for dry-run pipeline testing."
+            )
+        print(f"[STREAM] WARNING: GBT model not found at {gbt_model_path}. Using zero-prediction fallback (--allow-dummy-model).")
+        return None
+    print(f"[STREAM] Loading GBT model from {gbt_model_path}...")
+    gbt_model = PipelineModel.load(str(gbt_model_path))
+    print("[STREAM] GBT model loaded.")
+    return gbt_model
 
 
 def dedupe_batch(spark, df, gold_path: str):
@@ -273,6 +310,7 @@ def run_streaming_pipeline(
     reset: bool = False,
     dedupe: bool = True,
     starting_offsets: str = "earliest",
+    allow_dummy_model: bool = False,
 ):
     noaa_dir = resolve_path(cfg["paths"], "raw_noaa")
     models_dir = resolve_path(cfg["paths"], "models")
@@ -281,8 +319,14 @@ def run_streaming_pipeline(
     gold_path = resolve_path(cfg["paths"], "gold_predictions")
     gold_agg_path = resolve_path(cfg["paths"], "gold_congestion")
     checkpoint_root = os.path.join(resolve_path(cfg["paths"], "checkpoints"), metrics_logger.config_label)
+
+    gbt_model = load_scoring_model(models_dir, allow_dummy_model=allow_dummy_model)
+
     if reset:
-        reset_outputs([bronze_path, silver_path, gold_path, gold_agg_path, checkpoint_root])
+        reset_outputs(
+            [bronze_path, silver_path, gold_path, gold_agg_path, checkpoint_root],
+            allowed_roots=[bronze_path, silver_path, gold_path, gold_agg_path, checkpoint_root],
+        )
     elif test_mode and os.path.exists(checkpoint_root):
         import shutil
         shutil.rmtree(checkpoint_root, ignore_errors=True)
@@ -291,16 +335,6 @@ def run_streaming_pipeline(
 
     weather_static = load_static_weather(spark, noaa_dir)
     lane_mean_static = load_lane_mean(spark, models_dir)
-
-    gbt_model_path = os.path.join(models_dir, "gbt_pipeline_v1")
-    if not Path(gbt_model_path).exists():
-        print("[STREAM] WARNING: GBT model not found. Run 01_batch_train.py first.")
-        print("[STREAM] Using zero-prediction fallback for demo mode.")
-        gbt_model = None
-    else:
-        print(f"[STREAM] Loading GBT model from {gbt_model_path}...")
-        gbt_model = PipelineModel.load(gbt_model_path)
-        print("[STREAM] GBT model loaded.")
 
     raw_stream = (
         spark.readStream
@@ -344,7 +378,7 @@ def run_streaming_pipeline(
         .withColumn("Distance", F.col("distance").cast(DoubleType()))
         .withColumn("DepHourUTC", F.hour("wheels_off_ts").cast(DoubleType()))
         .withColumn("ArrHourUTC", F.hour("crs_arr_ts").cast(DoubleType()))
-        .withColumn("DayOfWeek", F.dayofweek(F.to_date("wheels_off_ts")).cast("int"))
+        .withColumn("DayOfWeek", F.dayofweek(F.coalesce(F.to_date(F.col("flight_date"), "yyyy-MM-dd"), F.to_date(F.col("wheels_off_ts")))).cast("int"))
         .filter(F.col("DepDelay").isNotNull() & F.col("Distance").isNotNull())
     )
 
@@ -419,13 +453,14 @@ def run_streaming_pipeline(
             ).cast(TimestampType())
         )
         .withColumn("is_high_risk", F.col("prediction") > F.lit(high_risk_thresh))
+        .withColumn("is_fallback_prediction", F.lit(gbt_model is None))
         .withColumn("ingest_date", today_col)
         .withColumn("enrich_date", today_col)
         .withColumn("gold_date", today_col)
     )
 
     silver_cols = [
-        "kafka_ts", "flight_id", "tail_number", "carrier", "origin", "dest",
+        "kafka_ts", "flight_id", "flight_date", "tail_number", "carrier", "origin", "dest",
         "crs_dep_time_utc", "wheels_off_utc", "crs_arr_time_utc",
         "emit_epoch_ms", "emit_ts",
         "wheels_off_ts", "crs_arr_ts", "sched_arr_hour_utc", "dest_icao",
@@ -436,7 +471,8 @@ def run_streaming_pipeline(
     gold_cols = [
         "flight_id", "carrier", "origin", "dest", "tail_number",
         "wheels_off_ts", "crs_arr_ts", "predicted_eta_utc",
-        F.col("DepDelay").alias("dep_delay"), "predicted_delta_delay", "is_high_risk",
+        F.col("DepDelay").alias("dep_delay"), "predicted_delta_delay",
+        "is_high_risk", "is_fallback_prediction",
         "DestWindSpeed", "DestVisibility", "DestTemp", "DestCeiling",
         "OriginWindSpeed", "OriginVisibility", "OriginTemp", "OriginCeiling",
         "LaneMeanDelay", "gold_date",
@@ -576,6 +612,8 @@ def main():
                              "the config paths (keeps benchmark runs out of the dashboard's Gold)")
     parser.add_argument("--no-dedupe", action="store_true",
                         help="Skip flight_id dedupe (benchmarks replay the same flights in a loop)")
+    parser.add_argument("--allow-dummy-model", action="store_true",
+                        help="Allow zero-prediction fallback when gbt_pipeline_v1 is missing (dry-run testing only)")
     args = parser.parse_args()
 
     cfg = load_config(args.config)
@@ -614,6 +652,7 @@ def main():
         reset=args.reset,
         dedupe=not args.no_dedupe,
         starting_offsets=args.starting_offsets,
+        allow_dummy_model=args.allow_dummy_model,
     )
 
     spark.stop()

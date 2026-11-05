@@ -1,5 +1,9 @@
 # Data directories & bulk files (MUST be downloaded via scripts before execution)
-data/
+data/*
+!data/sample/
+!data/sample/*.jsonl
+!data/sample/*.csv
+!data/sample/README.md
 *.zip
 *.parquet
 
@@ -56,5 +60,4 @@ models/lane_mean.parquet
 # Editor & IDE settings
 .vscode/
 .idea/
-docs/Phase 2/ENHANCED_IMPLEMENTATION_PLAN_STREAM.md
 docs/Phase 2/ENHANCED_IMPLEMENTATION_PLAN_STREAM.md

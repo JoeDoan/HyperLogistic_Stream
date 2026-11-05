@@ -31,13 +31,14 @@ import yaml
 try:
     from confluent_kafka import Producer, KafkaException
     CONFLUENT = True
+    HAS_KAFKA_CLIENT = True
 except ImportError:
+    CONFLUENT = False
     try:
         from kafka import KafkaProducer
-        CONFLUENT = False
+        HAS_KAFKA_CLIENT = True
     except ImportError:
-        print("ERROR: Install confluent-kafka or kafka-python:\n  pip install confluent-kafka")
-        sys.exit(1)
+        HAS_KAFKA_CLIENT = False
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 SHUTDOWN = threading.Event()
@@ -145,6 +146,7 @@ def parse_bts_row(row: dict):
 
         return {
             "flight_id": flight_id.replace(' ', ''),
+            "flight_date": flight_date,
             "tail_number": tail,
             "carrier": carrier,
             "origin": origin,
@@ -338,6 +340,10 @@ def main():
     parser.add_argument("--loop", action="store_true",
                         help="Loop forever (restart after all events emitted)")
     args = parser.parse_args()
+
+    if not HAS_KAFKA_CLIENT:
+        print("ERROR: Install confluent-kafka or kafka-python:\n  pip install confluent-kafka")
+        sys.exit(1)
 
     cfg = load_config(args.config)
     bootstrap_servers = args.bootstrap or cfg["kafka"]["bootstrap_servers"]

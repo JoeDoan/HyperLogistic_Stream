@@ -3,7 +3,9 @@ live/_common.py
 Shared helpers for the live-data prototype scripts (stdlib only, no new dependencies).
 """
 
+import email.utils
 import json
+import math
 import time
 import urllib.error
 import urllib.request
@@ -24,6 +26,37 @@ HUBS = [
 ]
 
 
+class RateLimitError(RuntimeError):
+    """HTTP 429 rate-limit error carrying the parsed Retry-After backoff window."""
+
+    def __init__(self, message: str, retry_after_s: float = 60.0, url: str = ""):
+        super().__init__(message)
+        self.retry_after_s = float(retry_after_s)
+        self.url = url
+
+
+def parse_retry_after(header_val: str | None, default_s: float = 60.0) -> float:
+    fallback = max(1.0, float(default_s))
+    if header_val is None:
+        return fallback
+    raw = str(header_val).strip()
+    if not raw:
+        return fallback
+    try:
+        numeric = float(raw)
+        if math.isfinite(numeric):
+            return max(1.0, numeric)
+    except ValueError:
+        pass
+    try:
+        dt = email.utils.parsedate_to_datetime(raw)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return max(1.0, (dt - datetime.now(timezone.utc)).total_seconds())
+    except (TypeError, ValueError, OverflowError):
+        return fallback
+
+
 def http_get(url: str, headers: dict | None = None, timeout: int = 20, retries: int = 2) -> bytes:
     """GET with a small retry/backoff. Raises the last error if all attempts fail."""
     hdrs = {"User-Agent": USER_AGENT, "Accept": "*/*"}
@@ -39,8 +72,18 @@ def http_get(url: str, headers: dict | None = None, timeout: int = 20, retries: 
         except urllib.error.HTTPError as e:
             last_err = e
             if e.code == 429:
-                print(f"  ! rate limited (429). Retry-After={e.headers.get('Retry-After')}")
-            if e.code in (429, 500, 502, 503, 504) and attempt < retries:
+                retry_hdr = e.headers.get("Retry-After") if e.headers else None
+                wait_s = parse_retry_after(retry_hdr, default_s=60.0)
+                print(f"  ! rate limited (429). Retry-After={retry_hdr} (wait {wait_s:.0f}s)")
+                if wait_s <= 15.0 and attempt < retries:
+                    time.sleep(wait_s)
+                    continue
+                raise RateLimitError(
+                    f"HTTP 429 for {url} (retry after {wait_s:.0f}s)",
+                    retry_after_s=wait_s,
+                    url=url,
+                ) from e
+            if e.code in (500, 502, 503, 504) and attempt < retries:
                 time.sleep(2 ** (attempt + 1))
                 continue
             raise

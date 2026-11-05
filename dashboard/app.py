@@ -65,6 +65,18 @@ def load_config():
     with open(cfg_path) as f:
         return yaml.safe_load(f)
 
+
+def get_high_risk_threshold(cfg: dict | None = None) -> float:
+    return float((cfg or load_config()).get("streaming", {}).get("high_risk_threshold_min", 5.0))
+
+
+def format_risk_metric_label(threshold: float) -> str:
+    return f"Elevated risk (Δ>{threshold:g}m)"
+
+
+def format_risk_chart_title(threshold: float) -> str:
+    return f"Elevated-Risk Arrivals (Δ > {threshold:g} min)"
+
 # Add list_parquet_files function for list parquet files
 def list_parquet_files(base: Path) -> list[Path]:
     """Committed Parquet files, newest first. Skips Spark temp/hidden files and files that vanish mid-scan."""
@@ -149,9 +161,28 @@ def read_benchmark_results() -> pd.DataFrame:
                 except Exception:
                     pass
 
-    if not all_records:
-        return pd.DataFrame()
-    return pd.DataFrame(all_records)
+    if all_records:
+        return pd.DataFrame(all_records)
+    for fname in ("benchmark_summary.csv", "summary.csv"):
+        summary_csv = bench_dir / fname
+        if summary_csv.exists():
+            return normalize_benchmark_summary(pd.read_csv(summary_csv))
+    return pd.DataFrame()
+
+
+def normalize_benchmark_summary(df: pd.DataFrame) -> pd.DataFrame:
+    rename_map = {
+        "label": "config",
+        "avg_throughput_rps": "throughput_rps",
+        "p50_batch_ms": "duration_ms",
+        "median_p50_latency_ms": "p50_latency_ms",
+        "median_p95_latency_ms": "p95_latency_ms",
+    }
+    out = df.rename(columns={k: v for k, v in rename_map.items() if k in df.columns and v not in df.columns})
+    for col in ("p50_latency_ms", "p95_latency_ms"):
+        if col not in out.columns:
+            out[col] = np.nan
+    return out
 
 
 def risk_color(delta: float) -> list:
@@ -168,6 +199,7 @@ def risk_color(delta: float) -> list:
 
 def demo_flights_df() -> pd.DataFrame:
     """Generate synthetic flight data for demo when pipeline hasn't run yet."""
+    thresh = get_high_risk_threshold()
     rng = np.random.default_rng(int(time.time()) % 100)
     hubs = list(HUB_COORDS.keys())
     rows = []
@@ -186,105 +218,191 @@ def demo_flights_df() -> pd.DataFrame:
             "dest_lat": d_lat, "dest_lon": d_lon,
             "dep_delay": dep_delay,
             "predicted_delta_delay": predicted_delta,
-            "is_high_risk": predicted_delta > 5,
+            "is_high_risk": predicted_delta > thresh,
         })
     return pd.DataFrame(rows)
 
 
+def _add_hub_coordinates(flights_df: pd.DataFrame, hub_coords: dict) -> pd.DataFrame:
+    df = flights_df.copy()
+    if "origin_lat" not in df.columns or "dest_lat" not in df.columns:
+        for col_prefix, col_name in [("origin", "origin"), ("dest", "dest")]:
+            lat_col, lon_col = f"{col_prefix}_lat", f"{col_prefix}_lon"
+            df[lat_col] = df[col_name].map(
+                lambda c: hub_coords[c][0] if c in hub_coords else np.nan
+            )
+            df[lon_col] = df[col_name].map(
+                lambda c: hub_coords[c][1] if c in hub_coords else np.nan
+            )
+    return df.dropna(subset=["origin_lat", "origin_lon", "dest_lat", "dest_lon"])
+
+
+def build_fleet_map_figure(
+    flights_df: pd.DataFrame,
+    hub_coords: dict | None = None,
+    thresh: float | None = None,
+) -> go.Figure:
+    """Build a self-contained USA-scoped Plotly figure with vectorized route risk buckets and hub markers."""
+    hub_coords = hub_coords or HUB_COORDS
+    if thresh is None:
+        thresh = get_high_risk_threshold()
+
+    df = _add_hub_coordinates(flights_df, hub_coords)
+    if "dep_delay" not in df.columns:
+        df["dep_delay"] = 0.0
+    if "is_high_risk" not in df.columns:
+        df["is_high_risk"] = df["predicted_delta_delay"] > thresh
+
+    fig = go.Figure()
+
+    if not df.empty:
+        routes = (
+            df.groupby(
+                ["origin", "dest", "origin_lat", "origin_lon", "dest_lat", "dest_lon"],
+                as_index=False,
+            )
+            .agg(
+                flight_count=("flight_id", "count"),
+                avg_dep_delay=("dep_delay", "mean"),
+                avg_pred_delta=("predicted_delta_delay", "mean"),
+                high_risk_count=("is_high_risk", "sum"),
+            )
+        )
+        routes["is_high_risk_route"] = routes["avg_pred_delta"] > thresh
+
+        buckets = [
+            (
+                routes[routes["avg_pred_delta"] <= 2],
+                "#10b981",
+                1.5,
+                0.65,
+                "On-time / Low (Δ ≤ 2m)",
+            ),
+            (
+                routes[(routes["avg_pred_delta"] > 2) & (~routes["is_high_risk_route"])],
+                "#f59e0b",
+                2.0,
+                0.75,
+                f"Moderate (2m < Δ ≤ {thresh:g}m)",
+            ),
+            (
+                routes[routes["is_high_risk_route"]],
+                "#ef4444",
+                2.4,
+                0.85,
+                f"Elevated risk (Δ > {thresh:g}m)",
+            ),
+        ]
+
+        for sub, color, width, opacity, label in buckets:
+            if sub.empty:
+                continue
+            lons: list[float | None] = []
+            lats: list[float | None] = []
+            for row in sub.itertuples(index=False):
+                lons.extend([float(row.origin_lon), float(row.dest_lon), None])
+                lats.extend([float(row.origin_lat), float(row.dest_lat), None])
+            fig.add_trace(
+                go.Scattergeo(
+                    lon=lons,
+                    lat=lats,
+                    mode="lines",
+                    line=dict(width=width, color=color),
+                    opacity=opacity,
+                    name=label,
+                    hoverinfo="skip",
+                )
+            )
+
+    outbound_counts = df.groupby("origin").size().to_dict() if not df.empty else {}
+    inbound_counts = df.groupby("dest").size().to_dict() if not df.empty else {}
+    hub_rows = []
+    for code, (lat, lon, name) in hub_coords.items():
+        in_cnt = int(inbound_counts.get(code, 0))
+        out_cnt = int(outbound_counts.get(code, 0))
+        hub_rows.append(
+            {
+                "code": code,
+                "name": name,
+                "lat": lat,
+                "lon": lon,
+                "hover": (
+                    f"<b>{code}</b> · {name}<br>"
+                    f"Inbound flights: {in_cnt}<br>"
+                    f"Outbound flights: {out_cnt}"
+                ),
+            }
+        )
+    hub_df = pd.DataFrame(hub_rows)
+    if not hub_df.empty:
+        fig.add_trace(
+            go.Scattergeo(
+                lon=hub_df["lon"],
+                lat=hub_df["lat"],
+                mode="markers+text",
+                marker=dict(size=9, color="#3b82f6", line=dict(width=1, color="white")),
+                text=hub_df["code"],
+                textposition="top center",
+                textfont=dict(color="white", size=10),
+                hovertext=hub_df["hover"],
+                hoverinfo="text",
+                name="Hubs",
+            )
+        )
+
+    fig.update_layout(
+        dragmode=False,
+        geo=dict(
+            scope="usa",
+            projection_type="albers usa",
+            showland=True,
+            landcolor="#1a1a2e",
+            bgcolor="#0d1117",
+            showlakes=False,
+            showsubunits=True,
+            subunitcolor="#374151",
+        ),
+        paper_bgcolor="#0d1117",
+        font_color="white",
+        height=470,
+        margin=dict(l=0, r=0, t=0, b=0),
+        legend=dict(orientation="h", yanchor="bottom", y=1.01, xanchor="left", x=0),
+    )
+    return fig
+
+
 def render_fleet_map(flights_df: pd.DataFrame):
-    """Render the PyDeck arc map using fallback plotly scatter if pydeck unavailable."""
+    """Render the USA-scoped Plotly fleet radar map with route risk buckets and hub markers."""
     st.subheader("Live Fleet Radar Map")
+    thresh = get_high_risk_threshold()
+
+    if "is_fallback_prediction" in flights_df.columns and any(
+        bool(v) for v in flights_df["is_fallback_prediction"] if pd.notna(v)
+    ):
+        st.warning("Gold table contains 0.0-minute fallback predictions generated with --allow-dummy-model.")
 
     if flights_df.empty:
         st.info("No live flight data — showing synthetic demo data.")
         flights_df = demo_flights_df()
-        # Remove duplicate flights and add live data to the dashboard 
-        flights_df = flights_df.drop_duplicates("flight_id", keep="last") 
+        flights_df = flights_df.drop_duplicates("flight_id", keep="last")
 
-    # Add coordinates
-    if "origin_lat" not in flights_df.columns:
-        for col_prefix, col_name in [("origin", "origin"), ("dest", "dest")]:
-            lat_col, lon_col = f"{col_prefix}_lat", f"{col_prefix}_lon"
-            flights_df[lat_col] = flights_df[col_name].map(
-                lambda c: HUB_COORDS[c][0] if c in HUB_COORDS else np.nan
-            )
-            flights_df[lon_col] = flights_df[col_name].map(
-                lambda c: HUB_COORDS[c][1] if c in HUB_COORDS else np.nan
-            )
-
-    flights_df = flights_df.dropna(subset=["origin_lat", "dest_lat"])
+    flights_df = _add_hub_coordinates(flights_df, HUB_COORDS)
     flights_df["risk_score"] = flights_df["predicted_delta_delay"].clip(-20, 120)
-    flights_df["predicted_delta_delay"] = flights_df["predicted_delta_delay"].round(1) # Add the roundup 
+    flights_df["predicted_delta_delay"] = flights_df["predicted_delta_delay"].round(1)
 
-    try:
-        import pydeck as pdk
-
-        arc_layer = pdk.Layer(
-            "ArcLayer",
-            data=flights_df,
-            get_source_position=["origin_lon", "origin_lat"],
-            get_target_position=["dest_lon", "dest_lat"],
-            get_source_color=[[16, 185, 129, 180]],
-            get_target_color="[is_high_risk ? 220 : 16, is_high_risk ? 38 : 185, is_high_risk ? 38 : 129, 200]",
-            get_width=1.5,
-            auto_highlight=True,
-            pickable=True,
-        )
-        scatter_layer = pdk.Layer(
-            "ScatterplotLayer",
-            data=pd.DataFrame([
-                {"name": v[2], "lat": v[0], "lon": v[1]} for v in HUB_COORDS.values()
-            ]),
-            get_position=["lon", "lat"],
-            get_color=[59, 130, 246, 255],
-            get_radius=25000,
-            pickable=True,
-        )
-        deck = pdk.Deck(
-            layers=[arc_layer, scatter_layer],
-            initial_view_state=pdk.ViewState(
-                latitude=38.5, longitude=-96.0, zoom=3.5, pitch=30
-            ),
-            tooltip={"text": "{flight_id}\n{origin}→{dest}\nDepDelay: {dep_delay}m\nPredicted Δ: {predicted_delta_delay}m"},
-            map_style="mapbox://styles/mapbox/dark-v9",
-        )
-        st.pydeck_chart(deck)
-    except ImportError:
-        # Fallback to plotly scatter
-        fig = go.Figure()
-        for _, row in flights_df.iterrows():
-            color = "red" if row["is_high_risk"] else ("orange" if row["predicted_delta_delay"] > 2 else "green")
-            fig.add_trace(go.Scattergeo(
-                lon=[row["origin_lon"], row["dest_lon"]],
-                lat=[row["origin_lat"], row["dest_lat"]],
-                mode="lines",
-                line=dict(width=1, color=color),
-                opacity=0.5,
-                showlegend=False,
-            ))
-        hub_df = pd.DataFrame([
-            {"name": v[2], "lat": v[0], "lon": v[1]} for v in HUB_COORDS.values()
-        ])
-        fig.add_trace(go.Scattergeo(
-            lon=hub_df["lon"], lat=hub_df["lat"],
-            mode="markers+text",
-            marker=dict(size=8, color="royalblue"),
-            text=hub_df["name"],
-            textposition="top right",
-        ))
-        fig.update_layout(
-            geo=dict(scope="usa", showland=True, landcolor="#1a1a2e", bgcolor="#0d1117"),
-            paper_bgcolor="#0d1117", font_color="white",
-            height=450, margin=dict(l=0, r=0, t=0, b=0),
-        )
-        st.plotly_chart(fig, width='stretch')
+    fig = build_fleet_map_figure(flights_df, HUB_COORDS, thresh)
+    st.plotly_chart(
+        fig,
+        use_container_width=True,
+        config={"scrollZoom": False, "displayModeBar": False},
+    )
 
     col1, col2, col3 = st.columns(3)
     with col1:
-        st.metric("Flights shown (latest)", f"{flights_df['flight_id'].nunique():,}") # Total unique flights
+        st.metric("Flights shown (latest)", f"{flights_df['flight_id'].nunique():,}")
     with col2:
         high_risk = int(flights_df["is_high_risk"].sum())
-        st.metric("Elevated risk (Δ>5m)", high_risk, delta=None)
+        st.metric(format_risk_metric_label(thresh), high_risk, delta=None)
     with col3:
         avg_delta = float(flights_df["predicted_delta_delay"].mean())
         st.metric("Avg Predicted Δ Delay", f"{avg_delta:.1f} min")
@@ -350,11 +468,12 @@ def render_hub_pressure(congestion_df: pd.DataFrame):
         st.plotly_chart(fig, width='stretch')
 
     with col2:
+        thresh = get_high_risk_threshold()
         fig2 = px.bar(
             congestion_df, x="dest", y="high_risk_count",
             color_discrete_sequence=["#dc2626"],
             labels={"dest": "Hub", "high_risk_count": "High-Risk Arrivals"},
-            title="Elevated-Risk Arrivals (Δ > 5 min)",
+            title=format_risk_chart_title(thresh),
         )
         fig2.update_layout(height=350, paper_bgcolor="rgba(0,0,0,0)")
         st.plotly_chart(fig2, use_container_width=True)
@@ -681,6 +800,25 @@ def render_system_health(benchmark_df: pd.DataFrame):
             st.metric("p95 E2E Latency", "—")
 
 
+def aggregate_benchmark(benchmark_df: pd.DataFrame) -> pd.DataFrame:
+    p95_batch_agg = (
+        ("p95_batch_ms", "median")
+        if "p95_batch_ms" in benchmark_df.columns
+        else ("duration_ms", lambda x: x.quantile(0.95))
+    )
+    return (
+        benchmark_df.groupby("config")
+        .agg(
+            avg_throughput=("throughput_rps", "mean"),
+            p50_batch_ms=("duration_ms", lambda x: x.quantile(0.50)),
+            p95_batch_ms=p95_batch_agg,
+            p50_latency_ms=("p50_latency_ms", "median"),
+            p95_latency_ms=("p95_latency_ms", "median"),
+        )
+        .reset_index()
+    )
+
+
 def render_benchmark(benchmark_df: pd.DataFrame):
     """RQ2 heatmap — throughput across (cores × shuffle_partitions)."""
     st.subheader("RQ2 Benchmark Results")
@@ -689,18 +827,7 @@ def render_benchmark(benchmark_df: pd.DataFrame):
         st.info("No benchmark results yet. Run: `python benchmark/run_benchmark.py`")
         return
 
-    # Aggregate per config
-    agg = (
-        benchmark_df.groupby("config")
-        .agg(
-            avg_throughput=("throughput_rps", "mean"),
-            p50_batch_ms=("duration_ms", lambda x: x.quantile(0.50)),
-            p95_batch_ms=("duration_ms", lambda x: x.quantile(0.95)),
-            p50_latency_ms=("p50_latency_ms", "median"),
-            p95_latency_ms=("p95_latency_ms", "median"),
-        )
-        .reset_index()
-    )
+    agg = aggregate_benchmark(benchmark_df)
 
     st.caption(benchmark_headline(agg))
 
@@ -762,7 +889,9 @@ def main():
     # Auto-refresh toggle
     with st.sidebar:
         st.header("Controls")
-        auto_refresh = st.checkbox("Auto-Refresh (10s)", value=True)
+        if st.button("Refresh Now"):
+            st.rerun()
+        auto_refresh = st.checkbox("Auto-Refresh (10s)", value=False)
         refresh_interval = st.slider("Refresh Interval (s)", 5, 60, 10)
         st.markdown("---")
         st.markdown("**API:** `http://localhost:8000/docs`")

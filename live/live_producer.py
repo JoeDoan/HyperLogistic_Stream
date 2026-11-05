@@ -5,7 +5,7 @@ Live ingestion: poll OpenSky, FAA NAS and NWS on their own schedules and publish
 to Kafka topics for Spark Structured Streaming.
 
 Topics (defaults, override with flags):
-    live_flights    <- OpenSky aircraft states        (every 30 s)
+    live_flights    <- OpenSky aircraft states        (every 120 s)
     airport_status  <- FAA NAS delays / ground stops  (every 60 s)
     weather         <- NWS observations per hub       (every 5 min)
 
@@ -36,7 +36,7 @@ from pathlib import Path
 import yaml
 
 sys.path.insert(0, os.path.dirname(__file__))
-from _common import HUBS, PROJECT_ROOT  # noqa: E402
+from _common import HUBS, PROJECT_ROOT, RateLimitError  # noqa: E402
 from fetch_faa_nas import fetch_faa  # noqa: E402
 from fetch_nws_weather import fetch_hub_weather  # noqa: E402
 from fetch_opensky import fetch_opensky  # noqa: E402
@@ -139,6 +139,8 @@ class Source:
         self.last_rows: list[dict] = []
         self.last_ok_epoch: float | None = None
         self.sent = self.failures = 0
+        self.sink_failures: int = 0
+        self.cooldown_until: float = 0.0
 
     def _stamp(self, rows, stale: bool):
         age = int(time.time() - self.last_ok_epoch) if self.last_ok_epoch else None
@@ -152,25 +154,59 @@ class Source:
         return out
 
     def poll_once(self, sink: Sink):
+        payload: list[dict] = []
+        is_stale = False
+        fetch_err: Exception | None = None
+
         try:
             rows = self.fetch()
             self.last_rows, self.last_ok_epoch = rows, time.time()
-            sink.send(self.topic, self._stamp(rows, stale=False), self.key_field)
-            self.sent += len(rows)
-            log(f"{self.name:<8} OK    {len(rows):>5} rows -> {self.topic}")
+            payload = self._stamp(rows, stale=False)
+        except RateLimitError as e:
+            self.failures += 1
+            fetch_err = e
+            self.cooldown_until = max(self.cooldown_until, time.monotonic() + e.retry_after_s)
+            if self.republish_stale and self.last_rows:
+                payload = self._stamp(self.last_rows, stale=True)
+                is_stale = True
+            else:
+                log(f"{self.name:<8} 429   ({e}) -> backing off {e.retry_after_s:.0f}s")
+                return
         except Exception as e:
             self.failures += 1
+            fetch_err = e
             if self.republish_stale and self.last_rows:
-                sink.send(self.topic, self._stamp(self.last_rows, stale=True), self.key_field)
-                log(f"{self.name:<8} FAIL  ({type(e).__name__}: {e}) -> re-sent {len(self.last_rows)} STALE rows")
+                payload = self._stamp(self.last_rows, stale=True)
+                is_stale = True
             else:
                 log(f"{self.name:<8} FAIL  ({type(e).__name__}: {e}) -> skipped")
+                return
+
+        try:
+            sink.send(self.topic, payload, self.key_field)
+        except Exception as sink_err:
+            self.sink_failures += 1
+            log(f"{self.name:<8} SINK FAIL ({type(sink_err).__name__}: {sink_err}) -> {self.topic}")
+            return
+
+        if is_stale:
+            log(f"{self.name:<8} FAIL  ({type(fetch_err).__name__}: {fetch_err}) -> re-sent {len(payload)} STALE rows")
+        else:
+            self.sent += len(payload)
+            log(f"{self.name:<8} OK    {len(payload):>5} rows -> {self.topic}")
 
     def run(self, sink: Sink):
         while not SHUTDOWN.is_set():
             started = time.monotonic()
-            self.poll_once(sink)
-            wait = max(1.0, self.interval - (time.monotonic() - started))
+            try:
+                self.poll_once(sink)
+            except Exception as exc:
+                log(f"{self.name:<8} UNEXPECTED ({type(exc).__name__}: {exc})")
+            wait = max(
+                1.0,
+                self.interval - (time.monotonic() - started),
+                self.cooldown_until - time.monotonic(),
+            )
             SHUTDOWN.wait(wait)
 
 
@@ -202,7 +238,7 @@ def main():
     ap.add_argument("--record", action="store_true", help="Save published messages to JSONL")
     ap.add_argument("--no-opensky", action="store_true")
     ap.add_argument("--once", action="store_true", help="Poll each source once, then exit")
-    ap.add_argument("--opensky-interval", type=int, default=30)
+    ap.add_argument("--opensky-interval", type=int, default=120)
     ap.add_argument("--faa-interval", type=int, default=60)
     ap.add_argument("--weather-interval", type=int, default=300)
     ap.add_argument("--hubs", nargs="*", default=HUBS, help="IATA codes for weather")
@@ -254,7 +290,7 @@ def main():
             t.join(timeout=5)
         sink.close()
         for s in sources:
-            log(f"{s.name:<8} total sent={s.sent:,} failures={s.failures}")
+            log(f"{s.name:<8} total sent={s.sent:,} failures={s.failures} sink_failures={s.sink_failures}")
 
 
 if __name__ == "__main__":
