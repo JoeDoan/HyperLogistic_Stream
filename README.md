@@ -64,10 +64,10 @@ docker compose up -d
 #    Start this first: it creates the Kafka topics the processor reads.
 python live/live_producer.py --record
 
-# 5. Spark live processor -> Gold tables (runs in Docker with Spark 3.5; wait ~10 s after step 4)
+# 5. Terminal B - Spark live processor -> Gold tables (runs in Docker with Spark 3.5; wait ~10 s after step 4)
 docker compose --profile live up -d live-processor
 
-# 6. Terminal B - dashboard
+# 6. Dashboard
 streamlit run dashboard/app.py
 ```
 
