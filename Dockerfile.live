@@ -1,0 +1,16 @@
+# Linux + Spark 3.5 for pipeline/04_live_processor.py.
+# Local Windows has no Hadoop winutils and may have a newer PySpark than the Kafka connector.
+FROM python:3.11-slim-bookworm
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends openjdk-17-jre-headless procps \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN pip install --no-cache-dir pyspark==3.5.1 pyyaml
+
+WORKDIR /app
+ENV JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64 \
+    PYTHONUNBUFFERED=1
+
+# Repo is bind-mounted at /app (see docker-compose.yml), so Gold tables land in ./data/gold/live.
+CMD ["python", "pipeline/04_live_processor.py", "--bootstrap", "kafka:9092"]

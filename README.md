@@ -46,7 +46,7 @@ In middle-mile freight logistics, unexpected transit delays create scheduling bo
 
 Runs the live radar and dashboard. It does **not** need the 11 GB dataset. If no pipeline output exists yet, the dashboard falls back to synthetic demo data.
 
-**Prerequisites:** Python 3.10+, Java 11/17, Apache Spark 3.5+, Docker Desktop.
+**Prerequisites:** Python 3.10+ and Docker Desktop (running). Spark and Java run inside Docker for the live path, so you do not install them locally.
 
 ```bash
 # 1. Clone and install
@@ -61,14 +61,19 @@ cp .env.example .env            # Windows: copy .env.example .env
 docker compose up -d
 
 # 4. Terminal A - live feeds -> Kafka (add --record to save a session for replay)
+#    Start this first: it creates the Kafka topics the processor reads.
 python live/live_producer.py --record
 
-# 5. Terminal B - Spark live processor -> Gold tables
-python pipeline/04_live_processor.py
+# 5. Spark live processor -> Gold tables (runs in Docker with Spark 3.5; wait ~10 s after step 4)
+docker compose --profile live up -d live-processor
 
-# 6. Terminal C - dashboard
+# 6. Terminal B - dashboard
 streamlit run dashboard/app.py
 ```
+
+The live processor runs in Docker (`Dockerfile.live`) because Windows has no Hadoop `winutils` and a newer local PySpark does not match the Spark 3.5 Kafka connector. On Linux or Colab you can run `python pipeline/04_live_processor.py` directly.
+
+Check it: `docker logs --tail 5 hyperlogistics-live-processor`. The Live Radar badge changes from RECORDED to LIVE after the next producer cycle (about a minute). Stop with `docker compose --profile live down` and Ctrl+C in the producer terminal.
 
 Open **http://localhost:8501**.
 
@@ -76,7 +81,6 @@ Open **http://localhost:8501**.
 |---|---|
 | Dashboard | http://localhost:8501 |
 | API docs (if started) | http://localhost:8000/docs |
-| Spark UI | http://localhost:4040 |
 | Kafka (external) | `localhost:9094` |
 
 **Dashboard only (no Kafka/Spark):** `streamlit run dashboard/app.py` shows demo data.
@@ -104,7 +108,7 @@ python scripts/download_noaa.py --years 2022 2023 2024
 
 ## 4. Running the Pipeline
 
-Run from the project root. Start Kafka first (`docker compose up -d`).
+Run from the project root. Start Kafka first (`docker compose up -d`). On Windows, run steps 1-3 and 8 on Colab or Linux (they need Spark with Hadoop `winutils`); the live path in Quick Start works locally through Docker.
 
 | Step | Command | Purpose |
 |---|---|---|
@@ -112,7 +116,7 @@ Run from the project root. Start Kafka first (`docker compose up -d`).
 | 2. Replay producer | `python pipeline/02_kafka_producer.py --rate 1000` | Replay 2024 trips into Kafka (`--limit`, `--loop`) |
 | 3. Replay processor | `python pipeline/03_stream_processor.py` | Score and write Gold tables (`--reset`, `--test`, `--cores`, `--shuffle-partitions`) |
 | 4. Live producer | `python live/live_producer.py --record` | FAA + weather + OpenSky to Kafka (`--no-opensky`, `--dry-run`, `--once`) |
-| 5. Live processor | `python pipeline/04_live_processor.py` | Live Spark stream (`--reset`, `--test`) |
+| 5. Live processor | `docker compose --profile live up -d live-processor` (Linux/Colab: `python pipeline/04_live_processor.py`) | Live Spark stream (`--reset`, `--test`) |
 | 6. API | `uvicorn api.main:app --port 8000` | REST endpoints for hub congestion |
 | 7. Dashboard | `streamlit run dashboard/app.py` | Live Radar, Replay & Benchmark, Model Insights |
 | 8. Benchmark | `python benchmark/run_benchmark.py --quick` | RQ2 grid (`--quick` = reduced grid) |
@@ -129,7 +133,8 @@ Defaults live in [`config/pipeline_config.yaml`](config/pipeline_config.yaml). O
 HyperLogistic_Stream/
 ├── README.md
 ├── requirements.txt            # Python dependencies
-├── docker-compose.yml          # Zookeeper + Kafka + topic init
+├── docker-compose.yml          # Zookeeper + Kafka + topic init (+ live-processor profile)
+├── Dockerfile.live             # Spark 3.5 image for the live processor
 ├── .env.example                # Environment variable template
 ├── config/                     # pipeline_config.yaml
 ├── scripts/                    # download_bts.py, download_noaa.py, run_eda.py,
@@ -218,6 +223,11 @@ Covers output isolation and `--reset` safety, config consistency, the dashboard'
 |---|---|
 | Dashboard shows "synthetic demo data" | Gold tables are empty. Start the producer and processor, then wait for a micro-batch |
 | Kafka connection refused | Run `docker compose up -d`. Use `localhost:9094` from the host |
+| `docker compose up` fails: cannot connect to the docker API | Start Docker Desktop and wait until it reports running |
+| Kafka container exits with `NodeExists` | Stale ZooKeeper state from an unclean stop. Run `docker compose down`, then `docker compose up -d` |
+| `HADOOP_HOME and hadoop.home.dir are unset` (Windows) | Do not run Spark scripts locally on Windows. Use the Docker live processor, or Colab/Linux |
+| Live processor stops with `UnknownTopicOrPartitionException` | The topics do not exist yet. Run the live producer once, then restart the processor |
+| Live Radar says RECORDED | No live Gold tables yet. Start the producer and the processor, then wait about a minute |
 | OpenSky rate-limit warnings | Run with `--no-opensky`. FAA + weather carry the story |
 | `StreamlitInvalidWidthError` | Use `width='stretch'` (not `'container'`) in `st.plotly_chart` |
 | Replay shows repeated rows | Rerun the processor with `--reset` |
