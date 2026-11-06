@@ -15,5 +15,5 @@ chrome --headless=new --no-pdf-header-footer --print-to-pdf=docs/poster/HyperLog
 chrome --headless=new --hide-scrollbars --window-size=2000,1500 --screenshot=docs/poster/poster_preview.png docs/poster/poster.html
 ```
 
-Numbers typed into `poster.html` (10.53 MAE, 17%, +1.0%, 4,448 records/s, 23 tests, JFK/PHX) come from
-`EVALUATION.md`. Update them there and here if results change (the benchmark is re-run on Nov 2).
+Numbers typed into `poster.html` (10.53 MAE, 17%, +1.0%, 4,448 records/s, 60+ tests, 77% / 12.2 / 9.7 live-vs-history) come from
+`EVALUATION.md` and `models/live_vs_historical.*`. Update them there and here if results change (the benchmark is re-run on Nov 2).

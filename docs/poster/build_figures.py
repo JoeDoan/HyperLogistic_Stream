@@ -99,6 +99,26 @@ def benchmark():
     save(fig, "benchmark.png")
 
 
+def live_vs_hist():
+    t = pd.read_csv(ROOT / "models" / "live_vs_historical.csv")
+    n = json.loads((ROOT / "models" / "live_vs_historical.json").read_text(encoding="utf-8"))["landed_flights_scored"]
+    labels = ["Assume the delay\nstays the same", "Historical\nhub average", "Estimator (live)\nSpark GBT (2024)"]
+    x = range(len(t))
+    fig, ax = plt.subplots(figsize=(6.2, 3.0))
+    b1 = ax.bar([i - 0.2 for i in x], t["live_mae"], 0.4, color=ORANGE, label=f"Live, {n} landed flights")
+    b2 = ax.bar([i + 0.2 for i in x], t["hist_mae"], 0.4, color=BLUE, label="2024 history, 1.67M flights")
+    for bars in (b1, b2):
+        for b in bars:
+            ax.text(b.get_x() + b.get_width() / 2, b.get_height() + 0.15, f"{b.get_height():.1f}",
+                    ha="center", fontsize=10, fontweight="bold")
+    ax.set_xticks(list(x)); ax.set_xticklabels(labels, fontsize=9)
+    ax.set_ylabel("Arrival error, MAE (min)")
+    ax.set_ylim(0, 15.5)
+    ax.set_title("Live vs. history: lower is better", loc="left")
+    ax.legend(frameon=False, fontsize=9, loc="upper right", bbox_to_anchor=(1.0, 1.04))
+    save(fig, "live_vs_hist.png")
+
+
 def qr(url):
     import qrcode
     img = qrcode.make(url, box_size=10, border=1)
@@ -111,4 +131,4 @@ if __name__ == "__main__":
     ap.add_argument("--url", default="https://github.com/mosomo82/HyperLogistic_Stream")
     args = ap.parse_args()
     OUT.mkdir(parents=True, exist_ok=True)
-    ablation(); outcome(); hubs(); benchmark(); qr(args.url)
+    ablation(); outcome(); hubs(); benchmark(); live_vs_hist(); qr(args.url)
