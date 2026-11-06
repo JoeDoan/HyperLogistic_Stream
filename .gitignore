@@ -62,3 +62,7 @@ models/lane_mean.parquet
 .idea/
 docs/Phase 2/ENHANCED_IMPLEMENTATION_PLAN_STREAM.md
 docs/Phase 2/PROFESSOR_MEETING_SCRIPT.md
+
+# Demo video assets and script
+docs/DEMO_VIDEO_SCRIPT.md
+vid/
