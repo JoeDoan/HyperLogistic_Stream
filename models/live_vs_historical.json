@@ -1,0 +1,15 @@
+{
+  "landed_flights_scored": 505,
+  "first_fetch_utc": "2026-11-05T21:20:59+00:00",
+  "last_fetch_utc": "2026-11-06T02:18:38+00:00",
+  "recorded_sessions": 11,
+  "share_arriving_early_pct": 77.2,
+  "mean_actual_delta_min": -8.45,
+  "late_over_15_n": 12,
+  "hist_validation_flights": 1665362,
+  "caveats": [
+    "Live rows use a rule-based estimator, not the trained Spark GBT.",
+    "Live baseline 2 uses 2024 hub averages (not true lane means).",
+    "Landed flights from one evening (about 5 hours of fetches); small sample, one time of day."
+  ]
+}

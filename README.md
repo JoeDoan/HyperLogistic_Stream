@@ -1,6 +1,6 @@
 # HyperLogistics-Stream
 
-**Real-Time Hub-to-Hub Logistics ETA Prediction with Kafka and Spark Structured Streaming**
+**Real-Time Hub-to-Hub Logistics Arrival Delay Prediction with Kafka and Spark Structured Streaming**
 
 [![CI](https://github.com/mosomo82/HyperLogistic_Stream/actions/workflows/ci.yml/badge.svg?branch=feat/tony-pipeline)](https://github.com/mosomo82/HyperLogistic_Stream/actions/workflows/ci.yml)
 
@@ -38,7 +38,13 @@ In middle-mile freight logistics, unexpected transit delays create scheduling bo
 1. **Ingestion:** Apache Kafka replays historical trips in chronological `WheelsOff` order at controlled rates (1k, 5k, 20k events/sec). A **live producer** also publishes OpenSky aircraft positions, FAA NAS airport status, and NWS weather.
 2. **Storage (Medallion):** Parquet tables in **Bronze** (raw), **Silver** (cleaned, weather-joined), and **Gold** (scored ETAs and hub rollups).
 3. **Processing & ML:** PySpark Structured Streaming with windowed aggregations and stream-static joins against NOAA weather; Spark MLlib (`GBTRegressor`, `RandomForestRegressor`) scores inbound trips.
-4. **Serving:** FastAPI REST endpoints and a Streamlit dashboard (**Live Radar** and **Replay & Benchmark** tabs).
+4. **Serving:** FastAPI REST endpoints and a Streamlit dashboard (**Live Radar**, **Replay & Benchmark** and **Model Insights** tabs).
+
+### What is new, and how it differs
+
+* **Live and history in one pipeline.** Today's weather, FAA delay programs, traffic and landed flights at a hub are compared with what is typical for that hub, hour and weekday (24 hubs, 8M training flights).
+* **Not another status board or statistics page.** Flight-status apps show only the present and delay-statistics sites show only the past. This project joins both, labels predictions as predictions, and lists where the model fails (`EVALUATION.md` sections 3.1 and 6).
+* **Practical impact.** A late departure rarely means an equally late arrival: 77% of the landed live flights we checked made up time in the air. Assuming "the delay stays the same" is off by 12.2 min on those flights; adjusting with history is off by 9.7 min (21% closer). That helps with pickups and connections.
 
 ---
 
@@ -67,7 +73,7 @@ python live/live_producer.py --record
 # 5. Terminal B - Spark live processor -> Gold tables (runs in Docker with Spark 3.5; wait ~10 s after step 4)
 docker compose --profile live up -d live-processor
 
-# 6. Dashboard
+# 6.ashboard
 streamlit run dashboard/app.py
 ```
 
@@ -200,6 +206,7 @@ Full tables, method and limits are in [`EVALUATION.md`](EVALUATION.md). Headline
 | Does weather help? | A little: **1.0%** lower MAE with destination and origin weather. Lane and schedule features do most of the work. |
 | Where is the model wrong? | It beats "no change" mainly on flights that arrive early. Flights that end up more than 15 min late are under-predicted by about 34 min, so it is not a severe-delay warning tool. |
 | **RQ2:** how fast? | Best of 12 configurations: about **4,450 records/s** (4 cores, 8 shuffle partitions, 5k events/s producer, 20k max offsets). 4 cores beat 2 by about 22%. Shuffle partitions made no clear difference. |
+| **Live vs. history:** does the pattern hold on live flights? | Yes, on a small sample. On 505 landed FlightAware flights, 2024 hub averages cut the error 20.7% vs. "no change" (15.3% on the 2024 validation year). The live rows use a rule-based estimator, **not** the trained Spark GBT, and cover one evening (`EVALUATION.md` section 8). |
 | Repeat-safe writes? | Yes. Replaying the same batch adds 0 rows to Gold (tested on real Spark). |
 
 The benchmark is provisional (4 batches per configuration, one run each), and end-to-end latency includes Kafka backlog time. Predictions on the dashboard are model outputs, not observed delays.

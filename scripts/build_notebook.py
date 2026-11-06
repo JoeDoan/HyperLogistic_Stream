@@ -14,7 +14,7 @@ cells = []
 # Title & Metadata
 cells.append(nbf.v4.new_markdown_cell("""# HyperLogistics-Stream: Data Cleaning & Exploratory Data Analysis (EDA)
 **Course:** COMP-SCI 5540 Principles of Big Data Management  
-**Project:** Real-Time Hub-to-Hub Logistics ETA Prediction with Kafka and Spark Structured Streaming  
+**Project:** Real-Time Hub-to-Hub Logistics Arrival Delay Prediction with Kafka and Spark Structured Streaming  
 **Authors:** Tony Nguyen & Joe Doan  
 **Instructor:** Dr. Md Yusuf Sarwar Uddin  
 
