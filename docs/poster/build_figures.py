@@ -128,7 +128,7 @@ def qr(url):
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
-    ap.add_argument("--url", default="https://github.com/mosomo82/HyperLogistic_Stream")
+    ap.add_argument("--url", default="https://github.com/JoeDoan/HyperLogistic_Stream")
     args = ap.parse_args()
     OUT.mkdir(parents=True, exist_ok=True)
     ablation(); outcome(); hubs(); benchmark(); live_vs_hist(); qr(args.url)
