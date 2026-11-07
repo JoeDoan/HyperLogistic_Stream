@@ -37,6 +37,7 @@ import yaml
 
 sys.path.insert(0, os.path.dirname(__file__))
 from _common import HUBS, PROJECT_ROOT, RateLimitError  # noqa: E402
+from fetch_aeroapi import AEROAPI_CORE_HUBS, _load_env_key, fetch_aeroapi_flights  # noqa: E402
 from fetch_faa_nas import fetch_faa  # noqa: E402
 from fetch_nws_weather import fetch_hub_weather  # noqa: E402
 from fetch_opensky import fetch_opensky  # noqa: E402
@@ -237,11 +238,13 @@ def main():
     ap.add_argument("--dry-run", action="store_true", help="Fetch and log, but do not publish")
     ap.add_argument("--record", action="store_true", help="Save published messages to JSONL")
     ap.add_argument("--no-opensky", action="store_true")
+    ap.add_argument("--no-aeroapi", action="store_true", help="Disable FlightAware AeroAPI polling")
     ap.add_argument("--once", action="store_true", help="Poll each source once, then exit")
     ap.add_argument("--opensky-interval", type=int, default=120)
     ap.add_argument("--faa-interval", type=int, default=60)
     ap.add_argument("--weather-interval", type=int, default=300)
-    ap.add_argument("--hubs", nargs="*", default=HUBS, help="IATA codes for weather")
+    ap.add_argument("--aeroapi-interval", type=int, default=600)
+    ap.add_argument("--hubs", nargs="*", default=HUBS, help="IATA codes for weather and AeroAPI")
     args = ap.parse_args()
 
     cfg = load_config(args.config)
@@ -257,6 +260,10 @@ def main():
     if not args.no_opensky:
         sources.append(Source("opensky", "live_flights", args.opensky_interval,
                               fetch_opensky_airborne, "icao24", republish_stale=False))
+    if not args.no_aeroapi and _load_env_key("AEROAPI_KEY"):
+        aero_hubs = AEROAPI_CORE_HUBS if args.hubs == HUBS else hubs
+        sources.append(Source("aeroapi", "aeroapi_flights", args.aeroapi_interval,
+                              lambda: fetch_aeroapi_flights(hubs=aero_hubs), "flight_id", republish_stale=True))
 
     log("=" * 56)
     log(f"HyperLogistics live producer | bootstrap={bootstrap} | dry_run={args.dry_run}")

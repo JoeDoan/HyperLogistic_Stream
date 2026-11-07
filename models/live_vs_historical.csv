@@ -1,0 +1,4 @@
+model,Features,live_mae,hist_mae,live_rmse,hist_rmse,live_gain_vs_no_change,hist_gain_vs_no_change
+Baseline 1: Predict 0 (No Change),0,12.19,12.75,16.09,16.63,0.0%,0.0%
+Baseline 2: Historical hub mean,1,9.66,10.8,13.62,15.33,+20.7%,+15.3%
+Live: rule-based estimator | 2024: Spark GBT,14,9.67,10.53,13.66,14.86,+20.7%,+17.4%

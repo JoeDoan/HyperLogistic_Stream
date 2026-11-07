@@ -88,7 +88,7 @@ streaming:
   window_duration: "1 hour"
   slide_duration: "15 minutes"
   watermark_delay: "6 hours"
-  high_risk_threshold_min: 5.0
+  high_risk_threshold_min: 15.0
 
 benchmark:
   cores: [2, 4, 8]

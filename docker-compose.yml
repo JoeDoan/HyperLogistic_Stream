@@ -52,6 +52,21 @@ services:
        kafka-topics --bootstrap-server kafka:9092 --describe --topic flights_stream"
     restart: "no"
 
+  # Opt-in: docker compose --profile live up live-processor
+  live-processor:
+    build:
+      context: .
+      dockerfile: Dockerfile.live
+    container_name: hyperlogistics-live-processor
+    profiles: ["live"]
+    depends_on:
+      kafka:
+        condition: service_healthy
+    volumes:
+      - .:/app
+      - ivy_cache:/root/.ivy2
+
 volumes:
+  ivy_cache:
   zookeeper_data:
   kafka_data:

@@ -71,11 +71,11 @@ def get_high_risk_threshold(cfg: dict | None = None) -> float:
 
 
 def format_risk_metric_label(threshold: float) -> str:
-    return f"Elevated risk (Δ>{threshold:g}m)"
+    return f"Elevated risk (Δ≥{threshold:g}m)"
 
 
 def format_risk_chart_title(threshold: float) -> str:
-    return f"Elevated-Risk Arrivals (Δ > {threshold:g} min)"
+    return f"Elevated-Risk Arrivals (Δ ≥ {threshold:g} min)"
 
 # Add list_parquet_files function for list parquet files
 def list_parquet_files(base: Path) -> list[Path]:
@@ -107,7 +107,7 @@ def read_gold_predictions(max_rows: int = 2000) -> pd.DataFrame:
 
     frames = []
     total = 0
-    for pf in pq_files[:10]:
+    for pf in pq_files:
         try:
             df = pd.read_parquet(pf)
             frames.append(df)
@@ -218,7 +218,7 @@ def demo_flights_df() -> pd.DataFrame:
             "dest_lat": d_lat, "dest_lon": d_lon,
             "dep_delay": dep_delay,
             "predicted_delta_delay": predicted_delta,
-            "is_high_risk": predicted_delta > thresh,
+            "is_high_risk": predicted_delta >= thresh,
         })
     return pd.DataFrame(rows)
 
@@ -250,8 +250,8 @@ def build_fleet_map_figure(
     df = _add_hub_coordinates(flights_df, hub_coords)
     if "dep_delay" not in df.columns:
         df["dep_delay"] = 0.0
-    if "is_high_risk" not in df.columns:
-        df["is_high_risk"] = df["predicted_delta_delay"] > thresh
+    # Always apply the dashboard threshold: the flag stored in Gold uses whatever threshold the run had.
+    df["is_high_risk"] = df["predicted_delta_delay"] >= thresh
 
     fig = go.Figure()
 
@@ -268,7 +268,7 @@ def build_fleet_map_figure(
                 high_risk_count=("is_high_risk", "sum"),
             )
         )
-        routes["is_high_risk_route"] = routes["avg_pred_delta"] > thresh
+        routes["is_high_risk_route"] = routes["avg_pred_delta"] >= thresh
 
         buckets = [
             (
@@ -290,7 +290,7 @@ def build_fleet_map_figure(
                 "#ef4444",
                 2.4,
                 0.85,
-                f"Elevated risk (Δ > {thresh:g}m)",
+                f"Elevated risk (Δ ≥ {thresh:g}m)",
             ),
         ]
 
@@ -386,7 +386,10 @@ def render_fleet_map(flights_df: pd.DataFrame):
         flights_df = demo_flights_df()
         flights_df = flights_df.drop_duplicates("flight_id", keep="last")
 
+    flights_df = flights_df.drop_duplicates("flight_id", keep="last")
     flights_df = _add_hub_coordinates(flights_df, HUB_COORDS)
+    # Apply the dashboard threshold: the flag stored in Gold reflects the threshold of the run that wrote it.
+    flights_df["is_high_risk"] = flights_df["predicted_delta_delay"] >= thresh
     flights_df["risk_score"] = flights_df["predicted_delta_delay"].clip(-20, 120)
     flights_df["predicted_delta_delay"] = flights_df["predicted_delta_delay"].round(1)
 
@@ -408,9 +411,9 @@ def render_fleet_map(flights_df: pd.DataFrame):
         st.metric("Avg Predicted Δ Delay", f"{avg_delta:.1f} min")
 
 
-def render_hub_pressure(congestion_df: pd.DataFrame):
+def render_hub_pressure(congestion_df: pd.DataFrame, flights_df: pd.DataFrame | None = None):
     """Bar chart of inbound arrival counts per hub."""
-    st.subheader("Hub Inbound Pressure (selected arrival hour)")
+    st.subheader("Hub Inbound Pressure (selected replay day and arrival hour)")
 
     top_hubs = ["ATL", "DEN", "ORD", "DFW", "LAX", "PHX", "LAS", "MCO"] # List of top hubs
 
@@ -443,11 +446,47 @@ def render_hub_pressure(congestion_df: pd.DataFrame):
             # latest windows in which every hub has flights
             hubs_per = agg.groupby("window_start")["dest"].nunique()
             good = hubs_per[hubs_per >= len(top_hubs)].index.sort_values(ascending=False)
-            windows = good.tolist()[:48] or agg["window_start"].sort_values(ascending=False).unique().tolist()[:48]
-            chosen = st.selectbox("Arrival hour (UTC, replay time)", windows,
-                                  format_func=lambda t: pd.Timestamp(t).strftime("%b %d %H:%M"))
+            windows = good.tolist() or agg["window_start"].sort_values(ascending=False).unique().tolist()
+            thr = get_high_risk_threshold()
+            have_preds = flights_df is not None and not flights_df.empty and "predicted_eta_utc" in flights_df.columns
+            risk_by_window = pd.Series(dtype=int)
+            if have_preds:
+                eta = pd.to_datetime(flights_df["predicted_eta_utc"], errors="coerce")
+                flagged = flights_df[(flights_df["predicted_delta_delay"] >= thr) & flights_df["dest"].isin(top_hubs)]
+                f_eta = pd.to_datetime(flagged["predicted_eta_utc"], errors="coerce").dropna().dt.floor("15min")
+                # a flight belongs to the 4 hourly windows (15-minute slide) that cover its ETA
+                risk_by_window = pd.concat([(f_eta - pd.Timedelta(minutes=15 * k)) for k in range(4)]).value_counts()
+
+            # pick the replay day first, then the hour: the replay covers a whole month of 2024
+            win_ts = pd.Series(pd.to_datetime(windows))
+            # keep windows that end by midnight, so each hour belongs to exactly one replay day
+            win_ts = win_ts[win_ts + pd.Timedelta(hours=1) <= win_ts.dt.normalize() + pd.Timedelta(days=1)]
+            days = sorted(win_ts.dt.normalize().unique(), reverse=True)
+            day_risk = f_eta.dt.normalize().value_counts().to_dict() if have_preds else {}
+            best_win = None
+            if len(risk_by_window):
+                in_scope = risk_by_window[risk_by_window.index.isin(set(win_ts))]
+                if len(in_scope):
+                    best_win = in_scope.idxmax()
+            best_day = pd.Timestamp(best_win).normalize() if best_win is not None else days[0]
+            c1, c2 = st.columns(2)
+            day = c1.selectbox(
+                "Replay day (flights replayed from 2024)", days, index=days.index(best_day),
+                format_func=lambda d: f"{pd.Timestamp(d):%a %Y-%m-%d} · {day_risk.get(d, 0)} elevated-risk arrivals")
+            hours = sorted([w for w in win_ts if w.normalize() == pd.Timestamp(day)], reverse=True)
+            hour_idx = hours.index(best_win) if (best_win is not None and best_win in hours) else 0
+            chosen = c2.selectbox(
+                "Arrival hour (UTC)", hours, index=hour_idx,
+                format_func=lambda t: f"{pd.Timestamp(t):%H:%M} - {pd.Timestamp(t) + pd.Timedelta(hours=1):%H:%M}"
+                                      + (f" · {int(risk_by_window.get(t, 0))} elevated" if len(risk_by_window) else ""))
             congestion_df = agg[agg["window_start"] == chosen][
-                ["dest", "inbound_count", "avg_predicted_delta", "high_risk_count"]]
+                ["dest", "inbound_count", "avg_predicted_delta", "high_risk_count"]].copy()
+            if have_preds:
+                # recount at the current threshold (the stored congestion counts use the run's threshold)
+                ws = pd.Timestamp(chosen)
+                sel = flights_df[(eta >= ws) & (eta < ws + pd.Timedelta(hours=1))]
+                hr = (sel["predicted_delta_delay"] >= thr).groupby(sel["dest"]).sum()
+                congestion_df["high_risk_count"] = congestion_df["dest"].map(hr).fillna(0).astype(int)
 
     if congestion_df.empty:
         st.warning("No hub data available.")
@@ -477,6 +516,10 @@ def render_hub_pressure(congestion_df: pd.DataFrame):
         )
         fig2.update_layout(height=350, paper_bgcolor="rgba(0,0,0,0)")
         st.plotly_chart(fig2, use_container_width=True)
+        if int(congestion_df["high_risk_count"].sum()) == 0:
+            st.caption(
+                "No arrivals above the threshold in this hour. The map's elevated-risk count "
+                "covers all loaded flights across every hub and hour; pick another arrival hour.")
 
 
 ANALYTICS_COLS = [
@@ -880,7 +923,7 @@ def main():
         unsafe_allow_html=True,
     )
 
-    st.title("HyperLogistics-Stream — Real-Time Hub-to-Hub ETA Dashboard")
+    st.title("HyperLogistics-Stream — Real-Time Hub-to-Hub Arrival Delay Dashboard")
     st.caption(
         f"COMP-SCI 5540 · UMKC Fall 2026 · Tony Nguyen & Joe Doan  |  "
         f"Last refresh: {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')}"
@@ -893,13 +936,16 @@ def main():
             st.rerun()
         auto_refresh = st.checkbox("Auto-Refresh (10s)", value=False)
         refresh_interval = st.slider("Refresh Interval (s)", 5, 60, 10)
+        max_flights = st.select_slider(
+            "Flights loaded (replay map)", options=[2000, 10000, 50000, 250000], value=250000,
+            help="Rows read from Gold, files newest first. 250,000 loads everything; lower is faster but may cover only part of the replay.")
         st.markdown("---")
         st.markdown("**API:** `http://localhost:8000/docs`")
         st.markdown("**Kafka:** `localhost:9094`")
         st.markdown("**Spark UI:** `localhost:4040`")
 
     # Load data
-    flights_df = read_gold_predictions()
+    flights_df = read_gold_predictions(max_rows=int(max_flights))
     congestion_df = read_hub_congestion()
     benchmark_df = read_benchmark_results()
 
@@ -912,7 +958,7 @@ def main():
     with tab_replay:
         render_fleet_map(flights_df)
         st.divider()
-        render_hub_pressure(congestion_df)
+        render_hub_pressure(congestion_df, flights_df)
         st.divider()
         analytics_df = read_gold_analytics()
         render_weather_impact(analytics_df)

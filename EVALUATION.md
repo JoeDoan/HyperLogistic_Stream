@@ -14,10 +14,23 @@
 | Where is the model wrong? | `models/error_by_*.csv` | 3.1 |
 | How fast is the streaming pipeline, and what drives it? | `benchmark/results/benchmark_summary.csv` | 4 |
 | Are Gold writes repeat-safe? | `tests/test_dedupe_spark.py` | 5 |
+| Do the historical patterns hold on live flights? | `models/live_vs_historical.csv` | 8 |
 | What can we **not** claim? | | 6 |
 
 The target is `delta_delay` (arrival delay minus departure delay, in minutes). Flights are a
 public proxy for freight movement.
+
+**How the evaluation works**
+
+- **Time-based split.** The model trains on 2018, 2019, 2021, 2022 and 2023 and is scored on 2024,
+  a year it never saw. 2020 is left out (pandemic traffic is not typical).
+- **Metric.** MAE is the average size of the arrival-time error in minutes (lower is better).
+  RMSE punishes large misses more. "Better than no change" means a smaller MAE than assuming the
+  departure delay stays the same all the way to the destination.
+- **Same yardstick everywhere.** The two baselines and the GBT are scored on the same 1,665,362
+  flights. The error tables in 3.1 slice that same set by hub, hour, month and outcome.
+- **Live check.** Section 8 repeats the comparison on flights that landed while the live feed was
+  recording, with a smaller and weaker version of the model (see the caveats there).
 
 ## 2. Model vs. baselines
 
@@ -39,6 +52,18 @@ Reading it plainly:
 - The GBT beats the lane-mean baseline by only **0.27 min (2.5%)**. The model is better,
   but not by a lot.
 - GBT beats random forest by 0.14 min on the same features.
+
+### 2.1 The models in this project
+
+| Model | What it is | Where it runs | Role |
+|---|---|---|---|
+| **Baseline 1: no change** | Predicts `delta_delay` = 0, so the arrival delay equals the departure delay | anywhere | Floor: what a traveler assumes today |
+| **Baseline 2: lane mean** | The average `delta_delay` of that origin-destination lane in the training years | Spark (batch) | Shows how much history alone explains |
+| **GBT, 14 features** | Gradient-boosted trees (Spark MLlib `GBTRegressor`): departure delay, distance, departure and arrival hour (UTC), weekday, lane mean delay and 4 + 4 origin and destination weather fields | Spark, trained on Colab | The model scored in sections 2 to 3.1 |
+| Random forest | Same 14 features, for comparison only | Spark, trained on Colab | Not served |
+| **Live estimator** | A hand-written rule approximation: hub and hour averages from the 2024 error tables, plus simple departure-delay and weather adjustments | Python, no Spark | Scores live flights in section 8; **not** the trained GBT |
+
+The trained GBT is not run on live flights yet. Section 8 says what that means for the live numbers.
 
 ## 3. Weather ablation
 
@@ -192,6 +217,10 @@ The 51 pure-Python tests run in under 1 second without starting a JVM. GitHub Ac
    (`sched_arr_hour_utc`), 1 to 6 hours after departure, rather than an airport forecast (TAF). That
    makes the +1.01% weather ablation gain an upper bound on what forecast arrival weather can deliver.
 
+9. **The live comparison is not a test of the GBT.** The live rows use the rule-based estimator and
+   2024 hub averages, not the trained model and not true lane means (section 8).
+10. **Small live sample.** The live check covers one evening of landed flights.
+
 ## 7. Reproduce
 
 ```bash
@@ -199,4 +228,37 @@ python -m pytest -v                                                             
 python pipeline/01_batch_train.py --config config/pipeline_config_colab.yaml     # 5-year train + 2024 ablation (Colab)
 python pipeline/04_error_analysis.py --config config/pipeline_config_colab.yaml  # 2024 error tables
 python benchmark/run_benchmark.py --config config/pipeline_config_colab.yaml     # pipeline benchmark
+python live/eval_live_vs_historical.py                                           # live vs. 2024 table (needs data/live_recordings)
 ```
+
+## 8. Live flights vs. history
+
+**Question:** do the patterns learned from 2018 to 2024 history also show up in flights that landed
+this week? Live flights come from FlightAware AeroAPI (scheduled and actual times, so the true
+`delta_delay` is known once a flight lands) with live NWS weather. `models/live_vs_historical.csv`
+holds the result; `live/eval_live_vs_historical.py` rebuilds it from the recorded sessions.
+
+| Model | Live MAE (505 landed flights) | 2024 MAE (1,665,362 flights) | Live vs. no change | 2024 vs. no change |
+|---|---|---|---|---|
+| Assume the delay stays the same | 12.19 | 12.75 | n/a | n/a |
+| Historical hub average | 9.66 | 10.80 | 20.7% better | 15.3% better |
+| Live: rule-based estimator, 2024: Spark GBT | 9.67 | 10.53 | 20.7% better | 17.4% better |
+
+What this shows:
+
+- **The historical pattern transfers.** Using only 2024 hub averages cuts the error by about a fifth on
+  live flights, a little more than on the 2024 validation year. Most flights make up time in the air:
+  77% of the landed live flights arrived earlier than their departure delay implied (average
+  `delta_delay` of -8.5 min).
+- **For a traveler:** if your flight leaves late, "it will arrive just as late" overstates the arrival delay
+  by about 8 minutes on average, with a typical error of 12 minutes. Adjusting with history cuts the typical
+  error to about 10 minutes. That helps with pickups and connections.
+- **The estimator adds nothing over the hub average** on live data (9.67 vs. 9.66). The GBT's extra edge
+  in 2024 (0.27 min) is exactly the kind of gain this small sample cannot confirm or deny.
+- **Big delays are still missed.** Only 12 of the 505 landed flights were more than 15 min late, and their
+  error was large (46 min on average), the same weakness as in section 3.1.
+
+Caveats (also in `models/live_vs_historical.json`): the live rows come from a rule-based estimator, not
+the trained GBT, and the "lane mean" for live flights is built from 2024 hub averages. The 505 flights
+landed over about 5 hours of one evening, so this is evidence of a matching pattern, not a second
+validation set. Scoring live flights with the real GBT is the next step.

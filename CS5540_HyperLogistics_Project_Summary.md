@@ -4,7 +4,7 @@
 **Môn học:** COMP-SCI 5540 Principles of Big Data Management (Fall 2026, UMKC)  
 **Giảng viên:** Dr. Md Yusuf Sarwar Uddin  
 **Nhóm thực hiện:** Tony Nguyen (`tmnc62@umsystem.edu`) & Joe Doan (`jdbc6@umsystem.edu`)  
-**Tên dự án:** HyperLogistics-Stream (Real-Time Hub-to-Hub ETA Prediction with Kafka and Spark Structured Streaming)  
+**Tên dự án:** HyperLogistics-Stream (Real-Time Hub-to-Hub Arrival Delay Prediction with Kafka and Spark Structured Streaming)  
 
 ---
 
