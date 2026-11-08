@@ -452,7 +452,7 @@ def run_streaming_pipeline(
                 F.col("prediction") * 60
             ).cast(TimestampType())
         )
-        .withColumn("is_high_risk", F.col("prediction") > F.lit(high_risk_thresh))
+        .withColumn("is_high_risk", F.col("prediction") >= F.lit(high_risk_thresh))
         .withColumn("is_fallback_prediction", F.lit(gbt_model is None))
         .withColumn("ingest_date", today_col)
         .withColumn("enrich_date", today_col)

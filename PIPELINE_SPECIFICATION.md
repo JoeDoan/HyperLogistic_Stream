@@ -1,6 +1,6 @@
 # HyperLogistics-Stream: End-to-End System Pipeline & Technical Specification
 
-**Project:** Real-Time Hub-to-Hub Logistics ETA Prediction with Kafka and Spark Structured Streaming  
+**Project:** Real-Time Hub-to-Hub Logistics Arrival Delay Prediction with Kafka and Spark Structured Streaming  
 **Course:** COMP-SCI 5540 Principles of Big Data Management, Fall 2026, UMKC  
 **Authors:** Tony Nguyen (`tmnc62@umsystem.edu`) & Joe Doan (`jdbc6@umsystem.edu`)  
 **Instructor:** Dr. Md Yusuf Sarwar Uddin  

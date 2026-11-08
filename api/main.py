@@ -46,7 +46,7 @@ cfg = load_config()
 
 app = FastAPI(
     title="HyperLogistics-Stream API",
-    description="Real-Time Hub-to-Hub ETA Prediction — COMP-SCI 5540 UMKC",
+    description="Real-Time Hub-to-Hub Arrival Delay Prediction — COMP-SCI 5540 UMKC",
     version="1.0.0",
 )
 

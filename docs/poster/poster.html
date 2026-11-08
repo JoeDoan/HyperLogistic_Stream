@@ -1,0 +1,297 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>HyperLogistics-Stream poster</title>
+<style>
+  @page { size: 2000px 1500px; margin: 0; }
+  :root {
+    --blue: #0b5cad; --dark: #12344d; --band: #a9d0de; --panel: #dff0f6; --panel2: #eef7fb;
+    --teal: #1d6b82; --orange: #e8912d; --green: #2f9e5b; --red: #c8372d; --ink: #1b2a35;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body { width: 2000px; height: 1500px; font-family: "Segoe UI", "Open Sans", Arial, sans-serif;
+         color: var(--ink); background: #fff; position: relative; overflow: hidden; }
+
+  /* ---------- header ---------- */
+  .header { position: absolute; left: 0; top: 0; width: 2000px; height: 150px; background: var(--blue);
+            color: #fff; padding: 6px 20px; }
+  .header h1 { margin: 0; font-size: 38.5px; letter-spacing: 0; line-height: 62px; white-space: nowrap; }
+  .header .sub { font-size: 24px; line-height: 31px; margin-top: 0; }
+  .header .sub span { margin-right: 30px; }
+  .header .qr { position: absolute; right: 330px; top: 12px; width: 126px; height: 126px; background: #fff; padding: 3px; }
+  .header .qr img { width: 100%; height: 100%; }
+  .header .logo { position: absolute; right: 24px; top: 34px; font-size: 84px; font-weight: 800; letter-spacing: 2px; }
+
+  /* ---------- highlight band ---------- */
+  .hl { position: absolute; top: 160px; height: 126px; width: 650px; border-radius: 24px; padding: 10px 18px 8px;
+        border: 3px solid var(--teal); background: var(--panel2); }
+  .hl h3 { margin: 0 0 3px; font-size: 26px; letter-spacing: .5px; }
+  .hl p { margin: 0; font-size: 20.5px; line-height: 26px; }
+  #h1 { left: 8px; } #h2 { left: 675px; } #h3 { left: 1342px; }
+  #h1 h3 { color: var(--blue); } #h2 h3 { color: var(--orange); } #h3 h3 { color: var(--green); }
+
+  /* ---------- panels ---------- */
+  .panel { position: absolute; background: #fff; border: 2px solid var(--band); border-radius: 26px; overflow: hidden; }
+  .panel h2 { margin: 0; background: var(--band); font-size: 34px; white-space: nowrap; text-align: center; padding: 8px 0 7px; font-weight: 800; }
+  .body { padding: 12px 18px; font-size: 22px; line-height: 29px; }
+  ul { margin: 6px 0 0 0; padding-left: 26px; } li { margin-bottom: 6px; }
+
+  #problem { left: 8px; top: 296px; width: 436px; height: 480px; }
+  #dataset { left: 8px; top: 788px; width: 436px; height: 704px; }
+  #diff    { left: 458px; top: 296px; width: 1136px; height: 286px; }
+  #arch    { left: 458px; top: 592px; width: 1136px; height: 236px; }
+  #models  { left: 458px; top: 838px; width: 1136px; height: 262px; }
+  #live    { left: 458px; top: 1110px; width: 1136px; height: 382px; }
+  #results { left: 1608px; top: 296px; width: 384px; height: 904px; }
+  #concl   { left: 1608px; top: 1210px; width: 384px; height: 282px; }
+
+  /* problem */
+  #problem .body { padding: 10px 18px 8px; font-size: 20.5px; line-height: 27px; }
+  .route { display: block; width: 100%; height: auto; margin: 0 0 6px; }
+
+  /* dataset */
+  .grp { font-weight: 800; font-size: 20px; letter-spacing: .5px; border-radius: 10px; padding: 3px 10px; margin: 2px 0 6px; color: #fff; }
+  .grp.hist { background: var(--blue); } .grp.live { background: var(--green); margin-top: 8px; }
+  .ds { display: flex; align-items: center; gap: 12px; margin: 2px 0 3px; }
+  .ds .icimg { flex: none; width: 50px; height: 50px; object-fit: contain; }
+  .ds .tag { flex: none; width: 50px; height: 50px; border-radius: 50%; background: #1b6fb5; color: #fff; font-weight: 800;
+             font-size: 15px; display: flex; align-items: center; justify-content: center; text-align: center; line-height: 16px; }
+  .ds b { display: block; font-size: 22px; line-height: 24px; }
+  .ds span { font-size: 18px; line-height: 21px; display: block; }
+  .share { background: var(--panel2); border-radius: 14px; padding: 6px 12px; margin-top: 6px; font-size: 16.5px; line-height: 20px; }
+  .share b { color: var(--blue); }
+
+  /* difference table */
+  .cmp { width: 100%; border-collapse: collapse; font-size: 19px; margin-top: 0; }
+  .cmp th { background: var(--panel); padding: 3px 8px; text-align: center; font-size: 19px; }
+  .cmp th.us { background: #d6efdf; color: #1c6b3d; }
+  .cmp td { padding: 2px 8px; border-bottom: 1px solid #c9dde6; text-align: center; }
+  .cmp td:first-child { text-align: left; font-weight: 600; }
+  .cmp td.us { background: #f0faf4; font-weight: 800; }
+  .y { color: var(--green); font-weight: 800; } .n { color: var(--red); font-weight: 800; } .m { color: #9a6a10; font-weight: 800; }
+  .fine { font-size: 15.5px; color: #55616b; margin: 3px 4px 0; }
+
+  /* architecture */
+  .lane { display: flex; align-items: center; gap: 6px; margin: 6px 0 0; }
+  .lane .lb { flex: none; width: 96px; height: 76px; border-radius: 12px; color: #fff; font-weight: 800; font-size: 20px;
+              line-height: 22px; display: flex; align-items: center; justify-content: center; text-align: center; }
+  .lane .lb.h { background: var(--blue); } .lane .lb.l { background: var(--green); }
+  .nb { flex: 1; height: 76px; background: #fff; border: 2.5px solid var(--teal); border-radius: 12px; padding: 3px 6px;
+        font-size: 17px; line-height: 19px; text-align: center; display: flex; flex-direction: column; justify-content: center; }
+  .nb b { font-size: 18.5px; line-height: 20px; color: var(--dark); }
+  .ar { flex: none; font-size: 24px; color: var(--teal); font-weight: 800; line-height: 1; }
+  .dash { flex: none; width: 170px; height: 158px; background: #fff7e8; border: 3px solid var(--orange); border-radius: 14px;
+          font-size: 18px; line-height: 21px; text-align: center; display: flex; flex-direction: column; justify-content: center; padding: 4px 6px; }
+  .dash b { font-size: 22px; line-height: 25px; color: #a35a0e; }
+  .arch-row { display: flex; align-items: center; gap: 8px; padding: 0 14px; }
+  .arch-lanes { flex: 1; }
+
+  /* models and evaluation */
+  .mgrid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  .mb { border: 2.5px solid var(--teal); border-radius: 14px; padding: 4px 10px; font-size: 17.5px; line-height: 20px; background: #fff; }
+  .mb b { display: block; font-size: 20px; line-height: 23px; color: var(--blue); }
+  .mb.star { border-color: var(--orange); background: #fff8ee; } .mb.star b { color: #a35a0e; }
+  .mb.warn { border-color: #b88a1a; background: #fffbe8; } .mb.warn b { color: #8a6a10; }
+  .evalbox { background: var(--panel2); border-radius: 14px; padding: 6px 12px; font-size: 18px; line-height: 22px; }
+  .evalbox b { color: var(--blue); }
+  .tiles { display: flex; gap: 8px; margin-top: 8px; }
+  .tile { flex: 1; background: var(--panel); border-radius: 12px; text-align: center; padding: 4px 2px; }
+  .tile b { display: block; font-size: 28px; line-height: 30px; color: var(--blue); }
+  .tile span { font-size: 15.5px; line-height: 17px; display: block; }
+  .tile.g b { color: var(--orange); }
+
+  /* live vs historical */
+  .lv { display: flex; gap: 14px; align-items: flex-start; }
+  .lv img { width: 540px; display: block; margin-top: 2px; }
+  .lv .txt { flex: 1; font-size: 19.5px; line-height: 24px; }
+  .lv .txt li { margin-bottom: 4px; }
+  .caveat { background: #fffbe8; border: 2px solid #d4b04a; border-radius: 12px; padding: 4px 10px; font-size: 16.5px; line-height: 20px; margin-top: 4px; }
+
+  /* results and conclusion */
+  .results img { width: 100%; display: block; margin: 8px 0 2px; }
+  .results .cap { font-size: 18.5px; line-height: 22px; margin: 0 0 8px; }
+  .results .cap b { color: var(--blue); }
+  .results .body { padding: 8px 14px 10px; }
+  .concl .body { font-size: 19.5px; line-height: 25px; padding: 8px 14px; }
+  .concl li { margin-bottom: 4px; }
+</style>
+</head>
+<body>
+
+<!-- ============ HEADER ============ -->
+<div class="header">
+  <h1>HYPERLOGISTICS-STREAM: REAL-TIME HUB-TO-HUB ARRIVAL DELAY PREDICTION</h1>
+  <div class="sub">Tony Nguyen, Joe Doan and Menkal Son &nbsp;|&nbsp; Instructor &amp; Advisor: Dr. Md Yusuf Sarwar Uddin</div>
+  <div class="sub">Computer Science 5540 &mdash; Principles of Big Data Management &mdash; Fall 2026</div>
+  <div class="qr"><img src="figures/qr_repo.png" alt="repo QR"></div>
+  <div class="logo">UMKC</div>
+</div>
+
+<!-- ============ INNOVATION / DIFFERENCE / IMPACT ============ -->
+<div class="hl" id="h1"><h3>INNOVATION</h3>
+  <p>Live and historical data in <b>one pipeline</b>: today&rsquo;s hub conditions compared with a <b>typical day</b> for that hub.</p></div>
+<div class="hl" id="h2"><h3>HOW WE DIFFER</h3>
+  <p>Status apps show only <i>now</i>; delay statistics only <i>the past</i>. We join both and <b>state where the model fails</b>.</p></div>
+<div class="hl" id="h3"><h3>PRACTICAL IMPACT</h3>
+  <p>Late departures often arrive less late: <b>77%</b> of live flights made up time. Better <b>pickups and connections</b>.</p></div>
+
+<!-- ============ LEFT ============ -->
+<div class="panel" id="problem">
+  <h2>Problem Statement</h2>
+  <div class="body">
+    <svg class="route" viewBox="0 14 396 160" xmlns="http://www.w3.org/2000/svg">
+      <path d="M92 92 Q198 -2 304 92" fill="none" stroke="#1d6b82" stroke-width="4" stroke-dasharray="3 10" stroke-linecap="round"/>
+      <path d="M292 82l12 10-17 3z" fill="#1d6b82"/>
+      <text x="198" y="46" font-size="42" text-anchor="middle" fill="#0b5cad" transform="rotate(90 198 36)">&#9992;</text>
+      <circle cx="58" cy="100" r="32" fill="#0b5cad"/>
+      <text x="58" y="108" font-size="24" font-weight="800" fill="#fff" text-anchor="middle">ORD</text>
+      <circle cx="338" cy="100" r="32" fill="#e8912d"/>
+      <text x="338" y="108" font-size="24" font-weight="800" fill="#fff" text-anchor="middle">DFW</text>
+      <text x="338" y="44" font-size="30" text-anchor="middle" fill="#6b7f8c">&#9729;</text>
+      <text x="58" y="152" font-size="16.5" font-weight="700" text-anchor="middle" fill="#12344d">Origin hub</text>
+      <text x="58" y="169" font-size="15" text-anchor="middle" fill="#c8372d">leaves 20 min late</text>
+      <text x="338" y="152" font-size="16.5" font-weight="700" text-anchor="middle" fill="#12344d">Destination</text>
+      <text x="338" y="169" font-size="15" text-anchor="middle" fill="#c8372d">arrives ? min late</text>
+      <text x="198" y="116" font-size="16" text-anchor="middle" fill="#1d6b82" font-weight="700">one trip</text>
+      <text x="198" y="136" font-size="15" text-anchor="middle" fill="#1b2a35">&#916; = ArrDelay &#8722; DepDelay</text>
+    </svg>
+    <ul>
+      <li>A late flight leaves <b>travelers and shipments</b> waiting at the next hub. Weather and ground stops make it worse.</li>
+      <li><b>Goal:</b> predict &Delta; in <b>real time</b> and flag hubs worse than their <b>typical</b> day.</li>
+      <li>Flights are a <b>public proxy</b> for hub-to-hub freight.</li>
+    </ul>
+  </div>
+</div>
+
+<div class="panel" id="dataset">
+  <h2>Two Data Worlds</h2>
+  <div class="body" style="padding-top:10px">
+    <div class="grp hist">HISTORICAL: train and test</div>
+    <div class="ds"><img class="icimg" src="figures/icons/bts.png" alt="bts">
+      <div><b>BTS On-Time flights</b><span>2018&ndash;2024, 24 US hubs. Train 8.0M, test 1.67M.</span></div></div>
+    <div class="ds"><img class="icimg" src="figures/icons/noaa.png" alt="noaa">
+      <div><b>NOAA ISD weather</b><span>Hourly wind, visibility, ceiling, temperature.</span></div></div>
+    <div class="grp live">LIVE: today</div>
+    <div class="ds"><div class="tag">Flight<br>Aware</div>
+      <div><b>FlightAware AeroAPI</b><span>Scheduled vs actual: true delay on landing.</span></div></div>
+    <div class="ds"><img class="icimg" src="figures/icons/faa.png" alt="faa">
+      <div><b>FAA NAS status</b><span>Ground stops and delay programs per airport.</span></div></div>
+    <div class="ds"><img class="icimg" src="figures/icons/nws.png" alt="nws">
+      <div><b>NWS weather</b><span>Live observations at each hub.</span></div></div>
+    <div class="ds"><img class="icimg" src="figures/icons/opensky.png" alt="opensky">
+      <div><b>OpenSky aircraft</b><span>Aircraft near hubs (no delay minutes).</span></div></div>
+    <div class="share">
+      <b>They share</b> hub, hour, weekday and weather: the bridge for comparing today with the past.
+      <b>Only history</b> has delay minutes for millions of flights, so the model trains there.
+    </div>
+  </div>
+</div>
+
+<!-- ============ CENTER ============ -->
+<div class="panel" id="diff">
+  <h2>How Our Approach Differs</h2>
+  <div class="body" style="padding:6px 16px 8px">
+    <table class="cmp">
+      <tr><th style="width:34%"></th><th>Flight-status apps</th><th>Delay-statistics sites</th><th class="us">HyperLogistics-Stream</th></tr>
+      <tr><td>Uses live data now</td><td class="y">yes</td><td class="n">no</td><td class="us y">yes</td></tr>
+      <tr><td>Uses years of history</td><td class="m">rarely</td><td class="y">yes</td><td class="us y">yes (8M flights)</td></tr>
+      <tr><td>Compares today with a typical day</td><td class="n">no</td><td class="n">no</td><td class="us y">yes, per hub, hour, weekday</td></tr>
+      <tr><td>Estimates arrival from delay and weather</td><td class="m">airline estimate</td><td class="n">no</td><td class="us y">yes, 14 inputs</td></tr>
+      <tr><td>Open, tested, states its limits</td><td class="n">no</td><td class="m">partly</td><td class="us y">60+ tests, limits listed</td></tr>
+    </table>
+    <div class="fine">Typical designs of each category, not a product-by-product review.</div>
+  </div>
+</div>
+
+<div class="panel" id="arch">
+  <h2>Architecture: One Pipeline, Two Data Worlds</h2>
+  <div class="arch-row" style="padding-top:8px">
+    <div class="arch-lanes">
+      <div class="lane"><div class="lb h">HISTORY<br>replay</div>
+        <div class="nb"><b>BTS + NOAA</b>Parquet files</div><div class="ar">&rarr;</div>
+        <div class="nb"><b>Kafka</b>replay topic</div><div class="ar">&rarr;</div>
+        <div class="nb"><b>Spark</b>join, dedupe</div><div class="ar">&rarr;</div>
+        <div class="nb"><b>Medallion</b>Bronze to Gold</div><div class="ar">&rarr;</div>
+        <div class="nb"><b>Boosted trees</b>14 features</div></div>
+      <div class="lane"><div class="lb l">LIVE<br>today</div>
+        <div class="nb"><b>4 live feeds</b>polled live</div><div class="ar">&rarr;</div>
+        <div class="nb"><b>Kafka</b>live topics</div><div class="ar">&rarr;</div>
+        <div class="nb"><b>Spark</b>live job</div><div class="ar">&rarr;</div>
+        <div class="nb"><b>Gold live</b>hub stress</div><div class="ar">&rarr;</div>
+        <div class="nb"><b>Vs. typical</b>hub, hour, day</div></div>
+    </div>
+    <div class="ar">&rarr;</div>
+    <div class="dash"><b>Dashboard + API</b>Live Radar, Replay, Model Insights</div>
+  </div>
+</div>
+
+<div class="panel" id="models">
+  <h2>The Models and How We Evaluate Them</h2>
+  <div class="body" style="padding:8px 14px; display:flex; gap:14px;">
+    <div class="mgrid" style="flex:1.45">
+      <div class="mb"><b>1. No change</b>Arrival delay = departure delay. What travelers assume today.</div>
+      <div class="mb"><b>2. Lane mean</b>Average change on that lane in the training years.</div>
+      <div class="mb star"><b>3. Boosted trees, 14 features</b>Gradient-boosted trees (GBT) in Spark MLlib: delay, distance, hours, weekday, lane, weather.</div>
+      <div class="mb warn"><b>4. Live estimator</b>Rule-based stand-in for live flights: hub and hour averages. Not the GBT.</div>
+    </div>
+    <div style="flex:1">
+      <div class="evalbox">
+        <b>Test on a year the model never saw.</b> Train 2018&ndash;2023 (8.0M flights), test 2024 (1.67M).
+        <b>Mean absolute error (MAE)</b> = average arrival-time error in minutes; lower is better. All models are scored on the same flights.
+      </div>
+      <div class="tiles">
+        <div class="tile"><b>12.75</b><span>no change</span></div>
+        <div class="tile"><b>10.80</b><span>lane mean</span></div>
+        <div class="tile g"><b>10.53</b><span>GBT: 17% better</span></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="panel" id="live">
+  <h2>Live vs. Historical: Does the Pattern Hold Today?</h2>
+  <div class="body" style="padding:8px 16px">
+    <div class="lv">
+      <img src="figures/live_vs_hist.png" alt="live vs historical">
+      <div class="txt">
+        <b style="color:var(--blue)">What it means for travelers</b>
+        <ul>
+          <li><b>77% of 505 landed live flights made up time</b> in the air (average &minus;8 min vs. departure delay).</li>
+          <li>&ldquo;Same delay&rdquo; is off by <b>12.2 min</b>; adjusting with history, <b>9.7 min</b> (<b>21% closer</b>).</li>
+          <li>Time <b>pickups and connections</b>; spot hubs worse than typical.</li>
+        </ul>
+        <div class="caveat"><b>Caveat:</b> one evening, 505 flights, rule-based estimator, not the Spark GBT. Big delays are still missed.</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ============ RIGHT ============ -->
+<div class="panel results" id="results">
+  <h2 style="font-size:34px">Results &amp; Evaluation</h2>
+  <div class="body">
+    <img src="figures/ablation.png" alt="ablation">
+    <p class="cap"><b>GBT beats both baselines</b> on 2024. Weather adds about 1%; lane and schedule matter most.</p>
+    <img src="figures/outcome.png" alt="outcome">
+    <p class="cap"><b>Wins on early flights</b>, loses to &ldquo;no change&rdquo; on on-time and late ones. Not a severe-delay alarm.</p>
+    <img src="figures/benchmark.png" alt="benchmark">
+    <p class="cap"><b>4,448 records/s</b> best (orange); 4 cores (dark) beat 2 by ~22%. Provisional: 4 batches per config.</p>
+  </div>
+</div>
+
+<div class="panel concl" id="concl">
+  <h2 style="font-size:27px">Conclusion &amp; Future Work</h2>
+  <div class="body" style="font-size:18.5px;line-height:23px">
+    <ul>
+      <li><b>Impact:</b> live and historical data in one repeat-safe pipeline, 60+ tests.</li>
+      <li><b>Limits:</b> big delays are missed; the live check is small.</li>
+      <li><b>Next:</b> score live flights with the boosted-trees model.</li>
+      <li><b>Thanks</b> to Dr. Md Yusuf Sarwar Uddin for feedback that shaped this project.</li>
+    </ul>
+  </div>
+</div>
+
+</body>
+</html>
