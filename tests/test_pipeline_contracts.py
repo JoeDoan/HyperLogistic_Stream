@@ -278,3 +278,146 @@ def test_error_analysis_forwards_driver_memory_and_shuffle_partitions():
     assert "--shuffle-partitions" in cli_flags
     assert {"cores", "shuffle_partitions", "driver_memory"}.issubset(build_spark_kwargs)
 
+
+@pytest.fixture(scope="module")
+def tune_gbt():
+    spec = importlib.util.spec_from_file_location("tune_gbt", ROOT / "scripts" / "tune_gbt.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def test_tune_gbt_should_accept_all_four_branches(tune_gbt):
+    assert tune_gbt.should_accept(
+        cand_val_mae=10.40,
+        cand_val_rmse=14.70,
+        excess_gap_mae=0.151,
+        excess_gap_rmse=0.10,
+        best_val_mae=10.50,
+        best_val_rmse=14.80,
+    ) == (False, "rejected_overfit")
+
+    assert tune_gbt.should_accept(
+        cand_val_mae=10.40,
+        cand_val_rmse=14.70,
+        excess_gap_mae=0.05,
+        excess_gap_rmse=0.351,
+        best_val_mae=10.50,
+        best_val_rmse=14.80,
+    ) == (False, "rejected_overfit")
+
+    assert tune_gbt.should_accept(
+        cand_val_mae=10.45,
+        cand_val_rmse=14.815,
+        excess_gap_mae=0.05,
+        excess_gap_rmse=0.10,
+        best_val_mae=10.50,
+        best_val_rmse=14.80,
+    ) == (False, "rejected_rmse_regression")
+
+    assert tune_gbt.should_accept(
+        cand_val_mae=10.499,
+        cand_val_rmse=14.79,
+        excess_gap_mae=0.05,
+        excess_gap_rmse=0.10,
+        best_val_mae=10.50,
+        best_val_rmse=14.80,
+    ) == (False, "rejected_no_mae_gain")
+
+    assert tune_gbt.should_accept(
+        cand_val_mae=10.48,
+        cand_val_rmse=14.805,
+        excess_gap_mae=0.08,
+        excess_gap_rmse=0.15,
+        best_val_mae=10.50,
+        best_val_rmse=14.80,
+    ) == (True, "accepted_new_champion")
+
+
+def test_tune_gbt_contracts_schedule_shift_and_metrics_preservation(tune_gbt, tmp_path):
+    src = (ROOT / "scripts" / "tune_gbt.py").read_text(encoding="utf-8")
+    tree = ast.parse(src)
+
+    top_imports = set()
+    for node in tree.body:
+        if isinstance(node, ast.Import):
+            top_imports.update(alias.name.split(".")[0] for alias in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            top_imports.add(node.module.split(".")[0])
+    assert "pyspark" not in top_imports
+
+    parsed = tune_gbt.parse_args(["--cache-dir", "/tmp/cache", "--baseline-metrics", "/tmp/m0.json"])
+    assert parsed.config is None
+    assert parsed.cache_dir == "/tmp/cache"
+    assert parsed.baseline_metrics == "/tmp/m0.json"
+    assert parsed.driver_memory == "28g"
+    assert parsed.shuffle_partitions == 64
+
+    names = [name for name, _ in tune_gbt.BASE_CANDIDATES]
+    assert names == [
+        "iter1_fine_bins_128",
+        "iter2_depth6_leaf200",
+        "iter3_depth7_stochastic",
+        "iter4_depth8_capacity_probe",
+    ]
+    assert tune_gbt.resolve_iter5_params(True, 8) == {
+        "maxDepth": 8,
+        "maxIter": 115,
+        "stepSize": 0.055,
+        "maxBins": 128,
+        "minInstancesPerNode": 600,
+        "subsamplingRate": 0.8,
+    }
+    assert tune_gbt.resolve_iter5_params(False, 5) == {
+        "maxDepth": 6,
+        "maxIter": 110,
+        "stepSize": 0.06,
+        "maxBins": 128,
+        "minInstancesPerNode": 350,
+        "subsamplingRate": 0.8,
+    }
+
+    assert tune_gbt.load_baseline_shift(tmp_path / "missing.csv") == pytest.approx((0.288, 0.507))
+    ablation_csv = tmp_path / "ablation.csv"
+    ablation_csv.write_text(
+        "model,train_mae,train_rmse,val_mae,val_rmse\n"
+        "baseline_lane_mean,10.5000,14.8000,10.8125,15.3250\n",
+        encoding="utf-8",
+    )
+    assert tune_gbt.load_baseline_shift(ablation_csv) == pytest.approx((0.3125, 0.5250))
+
+    base = {
+        "hub_count": 40,
+        "train_count": 12000000,
+        "val_count": 2500000,
+        "b1_mae": 12.7,
+        "b1_rmse": 16.6,
+        "b2_mae": 10.8,
+        "b2_rmse": 15.3,
+        "rf_mae": 10.67,
+        "rf_rmse": 15.16,
+        "train_years": [2018, 2019, 2021, 2022, 2023],
+        "val_year": 2024,
+    }
+    promoted = tune_gbt.build_champion_metrics(
+        base,
+        iter_name="iter3_depth7_stochastic",
+        params={"maxDepth": 7, "maxIter": 85},
+        seed=42,
+        train_mae=10.10,
+        train_rmse=14.20,
+        val_mae=10.42,
+        val_rmse=14.72,
+        excess_gap_mae=0.032,
+        feature_importances={"DepDelay": 0.25},
+    )
+    assert promoted["rf_mae"] == 10.67
+    assert promoted["b2_mae"] == 10.8
+    assert promoted["train_count"] == 12000000
+    assert promoted["gbt_champion_iter"] == "iter3_depth7_stochastic"
+    assert promoted["gbt_mae"] == 10.42
+    assert promoted["gbt_overfit_gap_mae"] == pytest.approx(0.32)
+    assert promoted["gbt_excess_overfit_gap_mae"] == pytest.approx(0.032)
+    assert promoted["gbt_params"] == {"maxDepth": 7, "maxIter": 85, "seed": 42}
+
+
