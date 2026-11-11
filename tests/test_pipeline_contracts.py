@@ -3,10 +3,14 @@ import argparse
 import ast
 from datetime import datetime
 import importlib.util
+import json
 from pathlib import Path
 
+import pandas as pd
 import pytest
 import yaml
+
+from config.hubs import HUBS
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -131,17 +135,59 @@ def test_stream_schema_and_dayofweek_parity_contracts():
 
 
 def test_colab_config_driver_memory_40_hubs_and_gbt_tuning_keys():
-    cfg = yaml.safe_load((ROOT / "config" / "pipeline_config_colab.yaml").read_text(encoding="utf-8"))
-    assert cfg["spark"]["driver_memory"] == "24g"
-    assert len(cfg["airports"]) == 40
-    training = cfg["training"]
-    assert training["gbt_max_iter"] == 50
-    assert training["gbt_max_depth"] == 5
-    assert training["gbt_step_size"] == 0.1
-    assert training["gbt_subsampling_rate"] == 1.0
-    assert training["gbt_min_instances_per_node"] == 1
-    assert training["gbt_max_bins"] == 32
-    assert training["seed"] == 42
+    metrics = json.loads((ROOT / "models" / "training_metrics.json").read_text(encoding="utf-8"))
+    expected_champion = {
+        "maxIter": 90,
+        "maxDepth": 8,
+        "stepSize": 0.07,
+        "subsamplingRate": 0.8,
+        "minInstancesPerNode": 500,
+        "maxBins": 128,
+        "seed": 42,
+    }
+    assert metrics["gbt_params"] == expected_champion
+
+    colab_cfg = yaml.safe_load((ROOT / "config" / "pipeline_config_colab.yaml").read_text(encoding="utf-8"))
+    assert colab_cfg["spark"]["driver_memory"] == "24g"
+
+    for cfg_name in ("pipeline_config_colab.yaml", "pipeline_config.yaml"):
+        cfg = yaml.safe_load((ROOT / "config" / cfg_name).read_text(encoding="utf-8"))
+        assert len(cfg["airports"]) == 40
+        training = cfg["training"]
+        assert training["rf_num_trees"] == 100
+        resolved = {
+            "maxIter": training["gbt_max_iter"],
+            "maxDepth": training["gbt_max_depth"],
+            "stepSize": training["gbt_step_size"],
+            "subsamplingRate": training["gbt_subsampling_rate"],
+            "minInstancesPerNode": training["gbt_min_instances_per_node"],
+            "maxBins": training["gbt_max_bins"],
+            "seed": training["seed"],
+        }
+        assert resolved == metrics["gbt_params"]
+
+
+def test_champion_40_hub_model_artifacts_and_tuning_trail_parity():
+    metrics = json.loads((ROOT / "models" / "training_metrics.json").read_text(encoding="utf-8"))
+    assert metrics["hub_count"] == 40
+    assert metrics["gbt_champion_iter"] == "iter4_depth8_capacity_probe"
+    assert metrics["gbt_mae"] < metrics["gbt_train_mae"] + 0.35
+
+    err_hub = pd.read_csv(ROOT / "models" / "error_by_hub.csv")
+    assert len(HUBS) == 40
+    assert set(err_hub["hub"]) == set(HUBS)
+
+    tuning = pd.read_csv(ROOT / "models" / "tuning_results.csv")
+    assert list(tuning["iteration"]) == [
+        "iter0_baseline_default",
+        "iter1_fine_bins_128",
+        "iter2_depth6_leaf200",
+        "iter3_depth7_stochastic",
+        "iter4_depth8_capacity_probe",
+        "iter5_adaptive_refinement",
+    ]
+    accepted = tuning[tuning["accepted"].astype(bool)]
+    assert accepted.iloc[-1]["iteration"] == "iter4_depth8_capacity_probe"
 
 
 def test_batch_train_gbt_tuning_overfit_and_cache_contracts():

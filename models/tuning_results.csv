@@ -1,0 +1,7 @@
+iteration,maxDepth,maxIter,stepSize,maxBins,minInstancesPerNode,subsamplingRate,train_mae,train_rmse,val_mae,val_rmse,overfit_gap_mae,overfit_gap_rmse,excess_overfit_gap_mae,excess_overfit_gap_rmse,delta_val_mae_vs_iter0,delta_val_mae_vs_prev_best,train_sec,accepted,status
+iter0_baseline_default,5,50,0.1,32,1,1.0,9.67053,13.64226,9.9404,14.15523,0.26986,0.51297,-0.01804,0.00677,0.0,0.0,0.0,True,baseline
+iter1_fine_bins_128,5,50,0.1,128,100,1.0,9.67316,13.64783,9.95019,14.16982,0.27703,0.52199,-0.01087,0.01579,0.0098,0.0098,403.4,False,rejected_rmse_regression
+iter2_depth6_leaf200,6,65,0.1,128,200,1.0,9.58626,13.48564,9.86895,14.01887,0.28269,0.53322,-0.00521,0.02702,-0.07145,-0.07145,584.9,True,accepted_new_champion
+iter3_depth7_stochastic,7,85,0.08,128,300,0.8,9.51393,13.34072,9.80901,13.89451,0.29508,0.55379,0.00718,0.04759,-0.13139,-0.05994,849.9,True,accepted_new_champion
+iter4_depth8_capacity_probe,8,90,0.07,128,500,0.8,9.46919,13.25445,9.77355,13.82231,0.30436,0.56785,0.01646,0.06165,-0.16685,-0.03546,1014.7,True,accepted_new_champion
+iter5_adaptive_refinement,8,115,0.055,128,600,0.8,9.47331,13.2645,9.77622,13.8288,0.30292,0.5643,0.01502,0.0581,-0.16417,0.00268,1334.9,False,rejected_no_mae_gain

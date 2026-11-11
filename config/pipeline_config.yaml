@@ -22,8 +22,12 @@ training:
   train_years: [2022]                      # matches 2022-2024 dataset on disk
   val_year: 2023
   stream_year: 2024
-  gbt_max_iter: 50
-  gbt_max_depth: 5
+  gbt_max_iter: 90
+  gbt_max_depth: 8
+  gbt_step_size: 0.07
+  gbt_subsampling_rate: 0.8
+  gbt_min_instances_per_node: 500
+  gbt_max_bins: 128
   rf_num_trees: 100
   seed: 42
 

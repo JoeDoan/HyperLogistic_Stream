@@ -28,12 +28,12 @@ training:
   train_years: [2018, 2019, 2021, 2022, 2023]   # 2020 excluded (COVID traffic collapse)
   val_year: 2024                                 # holdout test year, same year the producer replays
   stream_year: 2024
-  gbt_max_iter: 50
-  gbt_max_depth: 5
-  gbt_step_size: 0.1
-  gbt_subsampling_rate: 1.0
-  gbt_min_instances_per_node: 1
-  gbt_max_bins: 32
+  gbt_max_iter: 90
+  gbt_max_depth: 8
+  gbt_step_size: 0.07
+  gbt_subsampling_rate: 0.8
+  gbt_min_instances_per_node: 500
+  gbt_max_bins: 128
   rf_num_trees: 100
   seed: 42
 
