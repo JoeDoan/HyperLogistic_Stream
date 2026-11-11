@@ -243,9 +243,18 @@ def evaluate_live_vs_historical(scored_df: pd.DataFrame) -> dict:
     hist_metrics = cal["metrics"]
     hist_hub_df = cal["hub_df"]
     hist_bucket_df = cal["bucket_df"]
+    hist_val_count = int(hist_metrics.get("val_count", 3041312))
+    hist_gbt_mae = float(hist_metrics.get("gbt_mae", 9.774))
 
     if scored_df is None or scored_df.empty:
-        return {"has_live": False, "arrived_count": 0, "enroute_count": 0}
+        return {
+            "has_live": False,
+            "arrived_count": 0,
+            "enroute_count": 0,
+            "total_count": 0,
+            "hist_val_count": hist_val_count,
+            "hist_gbt_mae": hist_gbt_mae,
+        }
 
     enroute_df = scored_df[scored_df["status_category"] == "enroute"].copy()
     arrived_df = scored_df[
@@ -265,6 +274,8 @@ def evaluate_live_vs_historical(scored_df: pd.DataFrame) -> dict:
             "arrived_count": 0,
             "enroute_count": len(enroute_df),
             "total_count": len(scored_df),
+            "hist_val_count": hist_val_count,
+            "hist_gbt_mae": hist_gbt_mae,
         }
 
     err_gbt = arrived_df["predicted_delta_delay"] - arrived_df["actual_delta_delay"]
@@ -279,13 +290,12 @@ def evaluate_live_vs_historical(scored_df: pd.DataFrame) -> dict:
     live_lane_rmse = float(np.sqrt((err_lane ** 2).mean()))
     live_zero_rmse = float(np.sqrt((err_zero ** 2).mean()))
 
-    hist_gbt_mae = float(hist_metrics.get("gbt_mae", 10.533))
-    hist_lane_mae = float(hist_metrics.get("b2_mae", 10.799))
-    hist_zero_mae = float(hist_metrics.get("b1_mae", 12.749))
+    hist_lane_mae = float(hist_metrics.get("b2_mae", 10.193))
+    hist_zero_mae = float(hist_metrics.get("b1_mae", 12.042))
 
-    hist_gbt_rmse = float(hist_metrics.get("gbt_rmse", 14.863))
-    hist_lane_rmse = float(hist_metrics.get("b2_rmse", 15.329))
-    hist_zero_rmse = float(hist_metrics.get("b1_rmse", 16.627))
+    hist_gbt_rmse = float(hist_metrics.get("gbt_rmse", 13.822))
+    hist_lane_rmse = float(hist_metrics.get("b2_rmse", 14.614))
+    hist_zero_rmse = float(hist_metrics.get("b1_rmse", 15.801))
 
     live_gain_vs_zero_pct = 100.0 * (live_zero_mae - live_gbt_mae) / max(live_zero_mae, 1e-6)
     hist_gain_vs_zero_pct = 100.0 * (hist_zero_mae - hist_gbt_mae) / max(hist_zero_mae, 1e-6)
@@ -401,10 +411,11 @@ def evaluate_live_vs_historical(scored_df: pd.DataFrame) -> dict:
         "arrived_count": len(arrived_df),
         "enroute_count": len(enroute_df),
         "total_count": len(scored_df),
+        "hist_val_count": hist_val_count,
         "live_gbt_mae": round(live_gbt_mae, 2),
         "live_lane_mae": round(live_lane_mae, 2),
         "live_zero_mae": round(live_zero_mae, 2),
-        "hist_gbt_mae": round(hist_gbt_mae, 2),
+        "hist_gbt_mae": hist_gbt_mae,
         "hist_lane_mae": round(hist_lane_mae, 2),
         "hist_zero_mae": round(hist_zero_mae, 2),
         "live_gain_vs_zero_pct": round(live_gain_vs_zero_pct, 1),

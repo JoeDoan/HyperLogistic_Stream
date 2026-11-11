@@ -631,7 +631,9 @@ def render_aeroapi_comparison_section(data: dict):
 
     st.info(
         "Model note: live rows use a rule-based estimator (hub and hour averages plus departure-delay and weather "
-        "adjustments), not the trained Spark GBT. The 2024 columns come from the real GBT on 1,665,362 flights.")
+        f"adjustments), not the trained Spark GBT. The 2024 columns come from the real GBT on "
+        f"{ev.get('hist_val_count', 3041312):,} flights."
+    )
 
     m1, m2, m3, m4 = st.columns(4)
     m1.metric("Live AeroAPI Flights", f"{ev['total_count']:,}")
@@ -644,10 +646,13 @@ def render_aeroapi_comparison_section(data: dict):
             delta=f"{ev['live_gain_vs_zero_pct']:+.1f}% vs No-Change (2024 Val: {ev['hist_gbt_mae']:.2f}m)",
         )
     else:
-        m4.metric("2024 Historical MAE", "10.53 min")
+        m4.metric("2024 Historical MAE", f"{ev.get('hist_gbt_mae', 9.77):.2f} min")
 
     if ev.get("has_live"):
-        st.markdown("#### 1. Model Accuracy: Live Landed Flights Today vs. 2024 Historical Validation (1,665,362 Flights)")
+        st.markdown(
+            f"#### 1. Model Accuracy: Live Landed Flights Today vs. 2024 Historical Validation "
+            f"({ev.get('hist_val_count', 3041312):,} Flights)"
+        )
         st.dataframe(ev["comparison_table"], use_container_width=True, hide_index=True)
 
         col_a, col_b = st.columns(2)

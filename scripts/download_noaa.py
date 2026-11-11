@@ -11,7 +11,22 @@ import csv
 import argparse
 import urllib.request
 from pathlib import Path
-from tqdm import tqdm
+
+try:
+    from tqdm import tqdm
+except ImportError:
+    class tqdm:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def update(self, n=1):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc_val, exc_tb):
+            return False
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:

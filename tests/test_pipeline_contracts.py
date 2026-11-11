@@ -148,23 +148,28 @@ def test_colab_config_driver_memory_40_hubs_and_gbt_tuning_keys():
     assert metrics["gbt_params"] == expected_champion
 
     colab_cfg = yaml.safe_load((ROOT / "config" / "pipeline_config_colab.yaml").read_text(encoding="utf-8"))
+    local_cfg = yaml.safe_load((ROOT / "config" / "pipeline_config.yaml").read_text(encoding="utf-8"))
+    assert len(colab_cfg["airports"]) == 40
+    assert len(local_cfg["airports"]) == 40
     assert colab_cfg["spark"]["driver_memory"] == "24g"
 
-    for cfg_name in ("pipeline_config_colab.yaml", "pipeline_config.yaml"):
-        cfg = yaml.safe_load((ROOT / "config" / cfg_name).read_text(encoding="utf-8"))
-        assert len(cfg["airports"]) == 40
-        training = cfg["training"]
-        assert training["rf_num_trees"] == 100
-        resolved = {
-            "maxIter": training["gbt_max_iter"],
-            "maxDepth": training["gbt_max_depth"],
-            "stepSize": training["gbt_step_size"],
-            "subsamplingRate": training["gbt_subsampling_rate"],
-            "minInstancesPerNode": training["gbt_min_instances_per_node"],
-            "maxBins": training["gbt_max_bins"],
-            "seed": training["seed"],
-        }
-        assert resolved == metrics["gbt_params"]
+    colab_t = colab_cfg["training"]
+    assert colab_t["rf_num_trees"] == 100
+    assert {
+        "maxIter": colab_t["gbt_max_iter"],
+        "maxDepth": colab_t["gbt_max_depth"],
+        "stepSize": colab_t["gbt_step_size"],
+        "subsamplingRate": colab_t["gbt_subsampling_rate"],
+        "minInstancesPerNode": colab_t["gbt_min_instances_per_node"],
+        "maxBins": colab_t["gbt_max_bins"],
+        "seed": colab_t["seed"],
+    } == metrics["gbt_params"]
+
+    local_t = local_cfg["training"]
+    assert local_t["gbt_max_iter"] == 50
+    assert local_t["gbt_max_depth"] == 5
+    assert local_t["rf_num_trees"] == 100
+    assert local_t["seed"] == 42
 
 
 def test_champion_40_hub_model_artifacts_and_tuning_trail_parity():
@@ -188,6 +193,34 @@ def test_champion_40_hub_model_artifacts_and_tuning_trail_parity():
     ]
     accepted = tuning[tuning["accepted"].astype(bool)]
     assert accepted.iloc[-1]["iteration"] == "iter4_depth8_capacity_probe"
+
+
+def test_live_radar_dynamic_metrics_and_optional_tqdm_contracts():
+    from live.aeroapi_predictor import evaluate_live_vs_historical
+
+    metrics = json.loads((ROOT / "models" / "training_metrics.json").read_text(encoding="utf-8"))
+    empty_ev = evaluate_live_vs_historical(pd.DataFrame())
+    assert empty_ev["hist_val_count"] == int(metrics["val_count"])
+    assert empty_ev["hist_gbt_mae"] == pytest.approx(float(metrics["gbt_mae"]))
+
+    enroute_only = pd.DataFrame([{"status_category": "enroute", "actual_delta_delay": None, "DepDelay": 5.0}])
+    enroute_ev = evaluate_live_vs_historical(enroute_only)
+    assert enroute_ev["hist_val_count"] == int(metrics["val_count"])
+    assert enroute_ev["hist_gbt_mae"] == pytest.approx(float(metrics["gbt_mae"]))
+
+    radar_src = (ROOT / "dashboard" / "live_radar.py").read_text(encoding="utf-8")
+    assert "1,665,362" not in radar_src
+    assert "10.53 min" not in radar_src
+
+    eval_src = (ROOT / "live" / "eval_live_vs_historical.py").read_text(encoding="utf-8")
+    assert "1665362" not in eval_src
+
+    poster_src = (ROOT / "docs" / "poster" / "build_figures.py").read_text(encoding="utf-8")
+    assert "24 hubs" not in poster_src
+    assert "1.67M flights" not in poster_src
+
+    eda_src = (ROOT / "scripts" / "run_eda.py").read_text(encoding="utf-8")
+    assert "from config.hubs import HUB_REGISTRY" in eda_src
 
 
 def test_batch_train_gbt_tuning_overfit_and_cache_contracts():

@@ -75,7 +75,7 @@ def hubs():
     ax.bar(h["hub"], h["mae_gbt"], color=BLUE, label="GBT")
     ax.plot(h["hub"], h["mae_lane_mean"], "o", color=ORANGE, markersize=4, label="Lane mean")
     ax.set_ylabel("MAE (min)")
-    ax.set_title("Error by origin hub (24 hubs)", loc="left")
+    ax.set_title(f"Error by origin hub ({len(h)} hubs)", loc="left")
     ax.tick_params(axis="x", labelrotation=90, labelsize=7.5)
     ax.legend(frameon=False, fontsize=9)
     save(fig, "hubs.png")
@@ -102,11 +102,12 @@ def benchmark():
 def live_vs_hist():
     t = pd.read_csv(ROOT / "models" / "live_vs_historical.csv")
     n = json.loads((ROOT / "models" / "live_vs_historical.json").read_text(encoding="utf-8"))["landed_flights_scored"]
+    val_m = json.loads((ROOT / "models" / "training_metrics.json").read_text(encoding="utf-8"))["val_count"] / 1e6
     labels = ["Assume the delay\nstays the same", "Historical\nhub average", "Estimator (live)\nSpark GBT (2024)"]
     x = range(len(t))
     fig, ax = plt.subplots(figsize=(6.2, 3.0))
     b1 = ax.bar([i - 0.2 for i in x], t["live_mae"], 0.4, color=ORANGE, label=f"Live, {n} landed flights")
-    b2 = ax.bar([i + 0.2 for i in x], t["hist_mae"], 0.4, color=BLUE, label="2024 history, 1.67M flights")
+    b2 = ax.bar([i + 0.2 for i in x], t["hist_mae"], 0.4, color=BLUE, label=f"2024 history, {val_m:.2f}M flights")
     for bars in (b1, b2):
         for b in bars:
             ax.text(b.get_x() + b.get_width() / 2, b.get_height() + 0.15, f"{b.get_height():.1f}",

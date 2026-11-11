@@ -23,7 +23,7 @@ jobs:
 
       - name: Install test dependencies
         # pyspark runs the repeat-safe (dedupe) tests; no Kafka needed.
-        run: pip install pytest pandas numpy pyyaml pyarrow streamlit plotly pyspark==3.5.1
+        run: pip install pytest pandas numpy pyyaml pyarrow streamlit plotly tqdm pyspark==3.5.1
 
       - name: Run tests
         run: pytest -v

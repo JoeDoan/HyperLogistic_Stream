@@ -59,6 +59,12 @@ def main():
     out_csv = ROOT / "models" / "live_vs_historical.csv"
     table.to_csv(out_csv, index=False)
 
+    metrics_path = ROOT / "models" / "training_metrics.json"
+    hist_val_flights = (
+        int(json.loads(metrics_path.read_text(encoding="utf-8"))["val_count"])
+        if metrics_path.exists()
+        else int(ev.get("hist_val_count", 3041312))
+    )
     arrived = ev["arrived_df"]
     summary = {
         "landed_flights_scored": int(ev["arrived_count"]),
@@ -68,7 +74,7 @@ def main():
         "share_arriving_early_pct": ev["early_share_pct"],
         "mean_actual_delta_min": round(float(arrived["actual_delta_delay"].mean()), 2),
         "late_over_15_n": int((arrived["actual_delta_delay"] > 15).sum()),
-        "hist_validation_flights": 1665362,
+        "hist_validation_flights": hist_val_flights,
         "caveats": [
             "Live rows use a rule-based estimator, not the trained Spark GBT.",
             "Live baseline 2 uses 2024 hub averages (not true lane means).",

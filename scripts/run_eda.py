@@ -9,6 +9,7 @@ performs stream-static join simulation, and outputs high-resolution analytical f
 import os
 import re
 import glob
+import sys
 from pathlib import Path
 from datetime import datetime, timedelta
 import zoneinfo
@@ -18,6 +19,12 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
 
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from config.hubs import HUB_REGISTRY  # noqa: E402
+
 # Set publication style
 plt.style.use('seaborn-v0_8-whitegrid' if 'seaborn-v0_8-whitegrid' in plt.style.available else 'default')
 plt.rcParams['font.sans-serif'] = 'DejaVu Sans, Helvetica, Arial'
@@ -26,30 +33,8 @@ plt.rcParams['axes.linewidth'] = 0.8
 
 # Airport timezone and ICAO lookup table
 AIRPORT_METADATA = {
-    'ATL': {'icao': 'KATL', 'tz': 'America/New_York', 'name': 'Atlanta Hartsfield'},
-    'ORD': {'icao': 'KORD', 'tz': 'America/Chicago', 'name': "Chicago O'Hare"},
-    'DFW': {'icao': 'KDFW', 'tz': 'America/Chicago', 'name': 'Dallas/Fort Worth'},
-    'DEN': {'icao': 'KDEN', 'tz': 'America/Denver', 'name': 'Denver International'},
-    'LAX': {'icao': 'KLAX', 'tz': 'America/Los_Angeles', 'name': 'Los Angeles International'},
-    'JFK': {'icao': 'KJFK', 'tz': 'America/New_York', 'name': 'New York JFK'},
-    'EWR': {'icao': 'KEWR', 'tz': 'America/New_York', 'name': 'Newark Liberty'},
-    'SFO': {'icao': 'KSFO', 'tz': 'America/Los_Angeles', 'name': 'San Francisco International'},
-    'MEM': {'icao': 'KMEM', 'tz': 'America/Chicago', 'name': 'Memphis (FedEx Hub)'},
-    'SDF': {'icao': 'KSDF', 'tz': 'America/New_York', 'name': 'Louisville (UPS Hub)'},
-    'CVG': {'icao': 'KCVG', 'tz': 'America/New_York', 'name': 'Cincinnati (Amazon Air Hub)'},
-    'CLT': {'icao': 'KCLT', 'tz': 'America/New_York', 'name': 'Charlotte Douglas'},
-    'LAS': {'icao': 'KLAS', 'tz': 'America/Los_Angeles', 'name': 'Las Vegas'},
-    'PHX': {'icao': 'KPHX', 'tz': 'America/Phoenix', 'name': 'Phoenix Sky Harbor'},
-    'MIA': {'icao': 'KMIA', 'tz': 'America/New_York', 'name': 'Miami International'},
-    'IAH': {'icao': 'KIAH', 'tz': 'America/Chicago', 'name': 'Houston George Bush'},
-    'BOS': {'icao': 'KBOS', 'tz': 'America/New_York', 'name': 'Boston Logan'},
-    'SEA': {'icao': 'KSEA', 'tz': 'America/Los_Angeles', 'name': 'Seattle-Tacoma'},
-    'MSP': {'icao': 'KMSP', 'tz': 'America/Chicago', 'name': 'Minneapolis-Saint Paul'},
-    'DTW': {'icao': 'KDTW', 'tz': 'America/New_York', 'name': 'Detroit Metro'},
-    'PHL': {'icao': 'KPHL', 'tz': 'America/New_York', 'name': 'Philadelphia International'},
-    'BWI': {'icao': 'KBWI', 'tz': 'America/New_York', 'name': 'Baltimore/Washington'},
-    'SLC': {'icao': 'KSLC', 'tz': 'America/Denver', 'name': 'Salt Lake City'},
-    'MCO': {'icao': 'KMCO', 'tz': 'America/New_York', 'name': 'Orlando International'},
+    code: {'icao': info.icao, 'tz': info.tz, 'name': info.name}
+    for code, info in HUB_REGISTRY.items()
 }
 
 def parse_hhmm_to_time(val):
