@@ -64,6 +64,7 @@ def main():
     parser = argparse.ArgumentParser(description="Error analysis of the served GBT")
     parser.add_argument("--config", type=str, default=None)
     parser.add_argument("--cores", type=int, default=None)
+    parser.add_argument("--shuffle-partitions", type=int, default=64)
     args = parser.parse_args()
 
     bt = _load_train_module()
@@ -81,7 +82,11 @@ def main():
                      f"in-sample data. Pass the config used for training (e.g. "
                      f"--config config/pipeline_config_colab.yaml).")
 
-    spark = bt.build_spark(cores=args.cores)
+    spark = bt.build_spark(
+        cores=args.cores,
+        shuffle_partitions=args.shuffle_partitions,
+        driver_memory=cfg.get("spark", {}).get("driver_memory", "4g"),
+    )
     flights = bt.add_utc_timestamps(
         spark, bt.load_bts_csv(spark, str(bt.resolve_path(cfg["paths"], "raw_bts")), [val_year], airports),
         airports)

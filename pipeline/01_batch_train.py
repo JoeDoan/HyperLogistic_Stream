@@ -23,7 +23,6 @@ from pathlib import Path
 
 import yaml
 from pyspark.ml import Pipeline
-from pyspark.ml.evaluation import RegressionEvaluator
 from pyspark.ml.feature import VectorAssembler
 from pyspark.ml.regression import GBTRegressor, RandomForestRegressor
 from pyspark.sql import SparkSession
@@ -31,20 +30,12 @@ from pyspark.sql import functions as F
 from pyspark.sql.types import DoubleType, IntegerType, StringType
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(PROJECT_ROOT))
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from config.hubs import AIRPORT_TZ  # noqa: E402
 
 DEFAULT_CONFIG_PATH = PROJECT_ROOT / "config" / "pipeline_config.yaml"
-
-AIRPORT_TZ = {
-    'ATL': 'America/New_York', 'ORD': 'America/Chicago', 'DFW': 'America/Chicago',
-    'DEN': 'America/Denver', 'LAX': 'America/Los_Angeles', 'JFK': 'America/New_York',
-    'EWR': 'America/New_York', 'SFO': 'America/Los_Angeles', 'MEM': 'America/Chicago',
-    'SDF': 'America/New_York', 'CVG': 'America/New_York', 'CLT': 'America/New_York',
-    'LAS': 'America/Los_Angeles', 'PHX': 'America/Phoenix', 'MIA': 'America/New_York',
-    'IAH': 'America/Chicago', 'BOS': 'America/New_York', 'SEA': 'America/Los_Angeles',
-    'MSP': 'America/Chicago', 'DTW': 'America/New_York', 'PHL': 'America/New_York',
-    'BWI': 'America/New_York', 'SLC': 'America/Denver', 'MCO': 'America/New_York',
-}
 
 BASE_COLS = ["DepDelay", "Distance", "DepHourUTC", "ArrHourUTC", "DayOfWeek", "LaneMeanDelay"]
 DEST_WX_V1 = ["DestWindSpeed", "DestVisibility", "DestTemp"]
@@ -348,30 +339,48 @@ def build_baseline_table(train_data):
     )
 
 
+def resolve_gbt_params(training_cfg: dict, args) -> dict:
+    spec = (
+        ("maxIter", "gbt_max_iter", "gbt_max_iter", 50, int),
+        ("maxDepth", "gbt_max_depth", "gbt_max_depth", 5, int),
+        ("stepSize", "gbt_step_size", "gbt_step_size", 0.1, float),
+        ("subsamplingRate", "gbt_subsampling_rate", "gbt_subsampling_rate", 1.0, float),
+        ("minInstancesPerNode", "gbt_min_instances", "gbt_min_instances_per_node", 1, int),
+        ("maxBins", "gbt_max_bins", "gbt_max_bins", 32, int),
+    )
+    params = {}
+    for spark_key, cli_attr, yaml_key, default, cast in spec:
+        cli_val = getattr(args, cli_attr, None)
+        raw = cli_val if cli_val is not None else training_cfg.get(yaml_key, default)
+        params[spark_key] = cast(raw)
+    params["seed"] = int(training_cfg.get("seed", 42))
+    return params
+
+
 def evaluate_model(model, test_df, label_col=LABEL_COL, model_name="Model"):
     predictions = model.transform(test_df)
-    evaluator_mae = RegressionEvaluator(labelCol=label_col, predictionCol="prediction", metricName="mae")
-    evaluator_rmse = RegressionEvaluator(labelCol=label_col, predictionCol="prediction", metricName="rmse")
-    mae = evaluator_mae.evaluate(predictions)
-    rmse = evaluator_rmse.evaluate(predictions)
+    row = predictions.select(
+        F.avg(F.abs(F.col("prediction") - F.col(label_col))).alias("mae"),
+        F.sqrt(F.avg(F.pow(F.col("prediction") - F.col(label_col), 2))).alias("rmse"),
+    ).first()
+    mae, rmse = float(row["mae"]), float(row["rmse"])
     print(f"  [{model_name}] MAE={mae:.3f} min  RMSE={rmse:.3f} min")
     return mae, rmse
 
 
 def compute_baselines(test_df):
     """Compute Baseline 1 (delta=0) and Baseline 2 (train lane mean) MAE/RMSE."""
-    evaluator_mae = RegressionEvaluator(labelCol=LABEL_COL, predictionCol="b1_pred", metricName="mae")
-    evaluator_rmse = RegressionEvaluator(labelCol=LABEL_COL, predictionCol="b1_pred", metricName="rmse")
-    b1_df = test_df.withColumn("b1_pred", F.lit(0.0))
-    b1_mae = evaluator_mae.evaluate(b1_df)
-    b1_rmse = evaluator_rmse.evaluate(b1_df)
+    b1_err = F.lit(0.0) - F.col(LABEL_COL)
+    b2_err = F.col("LaneMeanDelay") - F.col(LABEL_COL)
+    row = test_df.select(
+        F.avg(F.abs(b1_err)).alias("b1_mae"),
+        F.sqrt(F.avg(F.pow(b1_err, 2))).alias("b1_rmse"),
+        F.avg(F.abs(b2_err)).alias("b2_mae"),
+        F.sqrt(F.avg(F.pow(b2_err, 2))).alias("b2_rmse"),
+    ).first()
+    b1_mae, b1_rmse = float(row["b1_mae"]), float(row["b1_rmse"])
+    b2_mae, b2_rmse = float(row["b2_mae"]), float(row["b2_rmse"])
     print(f"  [Baseline-1 No-Change]  MAE={b1_mae:.3f} min  RMSE={b1_rmse:.3f} min")
-
-    b2_df = test_df.withColumn("b2_pred", F.col("LaneMeanDelay"))
-    evaluator_mae2 = RegressionEvaluator(labelCol=LABEL_COL, predictionCol="b2_pred", metricName="mae")
-    evaluator_rmse2 = RegressionEvaluator(labelCol=LABEL_COL, predictionCol="b2_pred", metricName="rmse")
-    b2_mae = evaluator_mae2.evaluate(b2_df)
-    b2_rmse = evaluator_rmse2.evaluate(b2_df)
     print(f"  [Baseline-2 Lane Mean]  MAE={b2_mae:.3f} min  RMSE={b2_rmse:.3f} min")
     return {"b1_mae": b1_mae, "b1_rmse": b1_rmse, "b2_mae": b2_mae, "b2_rmse": b2_rmse}
 
@@ -382,6 +391,36 @@ def main():
     parser.add_argument("--cores", type=int, default=None, help="Spark local cores (default: all)")
     parser.add_argument("--shuffle-partitions", type=int, default=64, help="spark.sql.shuffle.partitions")
     parser.add_argument("--skip-rf", action="store_true", help="Skip Random Forest training to save time")
+    parser.add_argument(
+        "--skip-ablation",
+        action="store_true",
+        help="Fit only the full 14-feature GBT instead of all 4 ablation sets",
+    )
+    parser.add_argument("--gbt-max-iter", type=int, default=None)
+    parser.add_argument("--gbt-max-depth", type=int, default=None)
+    parser.add_argument("--gbt-step-size", type=float, default=None)
+    parser.add_argument("--gbt-subsampling-rate", type=float, default=None)
+    parser.add_argument("--gbt-min-instances", type=int, default=None)
+    parser.add_argument("--gbt-max-bins", type=int, default=None)
+    parser.add_argument("--rf-num-trees", type=int, default=None)
+    parser.add_argument("--rf-max-depth", type=int, default=None)
+    parser.add_argument(
+        "--cache-dir",
+        type=str,
+        default=None,
+        help="Optional local directory to materialize/reuse prepared train_df and val_df Parquet across tuning runs",
+    )
+    parser.add_argument(
+        "--metrics-out",
+        type=str,
+        default=None,
+        help="Optional path for output metrics JSON instead of models/training_metrics.json",
+    )
+    parser.add_argument(
+        "--no-save-model",
+        action="store_true",
+        help="Evaluate hyperparameters without overwriting models/gbt_pipeline_v1 on Drive",
+    )
     args = parser.parse_args()
 
     cfg = load_config(args.config)
@@ -390,6 +429,7 @@ def main():
     models_dir = resolve_path(cfg["paths"], "models")
     models_dir.mkdir(parents=True, exist_ok=True)
     airports = cfg.get("airports", AIRPORT_TZ)
+    gbt_params = resolve_gbt_params(cfg["training"], args)
 
     train_years = cfg["training"]["train_years"]
     val_year = cfg["training"]["val_year"]
@@ -397,7 +437,8 @@ def main():
 
     print("=" * 60)
     print("HyperLogistics-Stream: Phase 1 Batch Training")
-    print(f"Train years: {train_years}  |  Val year: {val_year}")
+    print(f"Train years: {train_years}  |  Val year: {val_year}  |  Hubs: {len(airports)}")
+    print(f"GBT params: {gbt_params}")
     print("=" * 60)
 
     spark = build_spark(
@@ -407,53 +448,70 @@ def main():
     )
 
     t0 = time.time()
-    bts_raw = load_bts_csv(spark, bts_dir, all_years, airports=airports)
-    bts_utc = add_utc_timestamps(spark, bts_raw, airports=airports)
-    noaa_df = load_noaa_weather(spark, noaa_dir, all_years)
+    cache_dir = Path(args.cache_dir) if args.cache_dir else None
+    cache_train = cache_dir / "train.parquet" if cache_dir else None
+    cache_val = cache_dir / "val.parquet" if cache_dir else None
 
-    print("[JOIN] Joining flights with destination weather...")
-    joined = join_weather(bts_utc, noaa_df)
+    if cache_dir and cache_train.exists() and cache_val.exists():
+        print(f"[CACHE] Reusing prepared train/val Parquet from {cache_dir}")
+        train_df = spark.read.parquet(str(cache_train)).cache()
+        val_df = spark.read.parquet(str(cache_val)).cache()
+    else:
+        bts_raw = load_bts_csv(spark, bts_dir, all_years, airports=airports)
+        bts_utc = add_utc_timestamps(spark, bts_raw, airports=airports)
+        noaa_df = load_noaa_weather(spark, noaa_dir, all_years)
 
-    train_data = joined.filter(F.col("Year").isin(train_years))
-    val_data = joined.filter(F.col("Year") == val_year)
+        print("[JOIN] Joining flights with destination weather...")
+        joined = join_weather(bts_utc, noaa_df)
 
-    lane_mean = (
-        train_data
-        .groupBy("Origin", "Dest")
-        .agg(F.avg("delta_delay").alias("LaneMeanDelay"))
-    )
-    lane_mean_path = str(models_dir / "lane_mean.parquet")
-    lane_mean.write.mode("overwrite").parquet(lane_mean_path)
-    print(f"[SAVE] Lane mean table -> {lane_mean_path}")
+        train_data = joined.filter(F.col("Year").isin(train_years))
+        val_data = joined.filter(F.col("Year") == val_year)
 
-    baseline_tbl = build_baseline_table(train_data).coalesce(1)
-    baseline_path = str(models_dir / "baseline_hub_hour_dow.parquet")
-    baseline_tbl.write.mode("overwrite").parquet(baseline_path)
-    baseline_pd = spark.read.parquet(baseline_path).toPandas().sort_values(
-        ["hub", "day_of_week", "hour_local"])
-    baseline_csv = models_dir / "baseline_hub_hour_dow.csv"
-    baseline_pd.round(3).to_csv(baseline_csv, index=False)
-    print(f"[SAVE] Baseline table ({len(baseline_pd):,} hub-hour-weekday cells, "
-          f"train years {train_years}) -> {baseline_path} + {baseline_csv.name}")
+        lane_mean = (
+            train_data
+            .groupBy("Origin", "Dest")
+            .agg(F.avg("delta_delay").alias("LaneMeanDelay"))
+        )
+        lane_mean_path = str(models_dir / "lane_mean.parquet")
+        lane_mean.write.mode("overwrite").parquet(lane_mean_path)
+        print(f"[SAVE] Lane mean table -> {lane_mean_path}")
 
-    lane_mean_cached = spark.read.parquet(lane_mean_path).cache()
-    train_cols = FEATURE_COLS + [LABEL_COL]
-    train_df = (
-        train_data
-        .join(F.broadcast(lane_mean_cached), on=["Origin", "Dest"], how="left")
-        .fillna(0.0, subset=["LaneMeanDelay"])
-        .select(train_cols)
-        .dropna(subset=train_cols)
-        .cache()
-    )
-    val_df = (
-        val_data
-        .join(F.broadcast(lane_mean_cached), on=["Origin", "Dest"], how="left")
-        .fillna(0.0, subset=["LaneMeanDelay"])
-        .select(train_cols)
-        .dropna(subset=train_cols)
-        .cache()
-    )
+        baseline_tbl = build_baseline_table(train_data).coalesce(1)
+        baseline_path = str(models_dir / "baseline_hub_hour_dow.parquet")
+        baseline_tbl.write.mode("overwrite").parquet(baseline_path)
+        baseline_pd = spark.read.parquet(baseline_path).toPandas().sort_values(
+            ["hub", "day_of_week", "hour_local"])
+        baseline_csv = models_dir / "baseline_hub_hour_dow.csv"
+        baseline_pd.round(3).to_csv(baseline_csv, index=False)
+        print(f"[SAVE] Baseline table ({len(baseline_pd):,} hub-hour-weekday cells, "
+              f"train years {train_years}) -> {baseline_path} + {baseline_csv.name}")
+
+        lane_mean_cached = spark.read.parquet(lane_mean_path).cache()
+        train_cols = FEATURE_COLS + [LABEL_COL]
+        train_prepared = (
+            train_data
+            .join(F.broadcast(lane_mean_cached), on=["Origin", "Dest"], how="left")
+            .fillna(0.0, subset=["LaneMeanDelay"])
+            .select(train_cols)
+            .dropna(subset=train_cols)
+        )
+        val_prepared = (
+            val_data
+            .join(F.broadcast(lane_mean_cached), on=["Origin", "Dest"], how="left")
+            .fillna(0.0, subset=["LaneMeanDelay"])
+            .select(train_cols)
+            .dropna(subset=train_cols)
+        )
+        if cache_dir:
+            cache_dir.mkdir(parents=True, exist_ok=True)
+            train_prepared.write.mode("overwrite").parquet(str(cache_train))
+            val_prepared.write.mode("overwrite").parquet(str(cache_val))
+            print(f"[CACHE] Materialized prepared train/val Parquet -> {cache_dir}")
+            train_df = spark.read.parquet(str(cache_train)).cache()
+            val_df = spark.read.parquet(str(cache_val)).cache()
+        else:
+            train_df = train_prepared.cache()
+            val_df = val_prepared.cache()
 
     train_count = train_df.count()
     val_count = val_df.count()
@@ -464,81 +522,144 @@ def main():
     print(f"\n[EVAL] Computing holdout baselines on {val_year}:")
     baseline_metrics = compute_baselines(val_df)
 
-    print("\n[ABLATION] Weather feature ablation (GBT, same hyperparameters):")
-    ablation_rows = [
-        {"model": "baseline_no_change", "description": "predict delta = 0", "n_features": 0,
-         "val_mae": baseline_metrics["b1_mae"], "val_rmse": baseline_metrics["b1_rmse"], "train_sec": 0.0},
-        {"model": "baseline_lane_mean", "description": "training lane mean delta", "n_features": 1,
-         "val_mae": baseline_metrics["b2_mae"], "val_rmse": baseline_metrics["b2_rmse"], "train_sec": 0.0},
-    ]
-    gbt_pipeline_model = None
-    for name, desc, cols in ABLATION_SETS:
-        asm = VectorAssembler(inputCols=cols, outputCol="features", handleInvalid="skip")
-        est = GBTRegressor(
-            featuresCol="features", labelCol=LABEL_COL,
-            maxIter=cfg["training"]["gbt_max_iter"], maxDepth=cfg["training"]["gbt_max_depth"],
-            seed=cfg["training"]["seed"],
+    if args.skip_ablation:
+        print("\n[TRAIN] Training full 14-feature GBTRegressor Pipeline (--skip-ablation)...")
+        est = GBTRegressor(featuresCol="features", labelCol=LABEL_COL, **gbt_params)
+        t_gbt = time.time()
+        gbt_pipeline_model = Pipeline(stages=[assembler, est]).fit(train_df)
+        print(f"  GBT training time: {time.time()-t_gbt:.1f}s")
+        gbt_train_mae, gbt_train_rmse = evaluate_model(gbt_pipeline_model, train_df, model_name="GBT-Train")
+        gbt_mae, gbt_rmse = evaluate_model(gbt_pipeline_model, val_df, model_name="GBT-Val")
+    else:
+        print("\n[EVAL] Computing in-sample baselines on train years:")
+        train_baselines = compute_baselines(train_df)
+        print("\n[ABLATION] Weather feature ablation (GBT, same hyperparameters):")
+        ablation_rows = [
+            {
+                "model": "baseline_no_change",
+                "description": "predict delta = 0",
+                "n_features": 0,
+                "train_mae": train_baselines["b1_mae"],
+                "train_rmse": train_baselines["b1_rmse"],
+                "val_mae": baseline_metrics["b1_mae"],
+                "val_rmse": baseline_metrics["b1_rmse"],
+                "train_sec": 0.0,
+            },
+            {
+                "model": "baseline_lane_mean",
+                "description": "training lane mean delta",
+                "n_features": 1,
+                "train_mae": train_baselines["b2_mae"],
+                "train_rmse": train_baselines["b2_rmse"],
+                "val_mae": baseline_metrics["b2_mae"],
+                "val_rmse": baseline_metrics["b2_rmse"],
+                "train_sec": 0.0,
+            },
+        ]
+        gbt_pipeline_model = None
+        for name, desc, cols in ABLATION_SETS:
+            asm = VectorAssembler(inputCols=cols, outputCol="features", handleInvalid="skip")
+            est = GBTRegressor(featuresCol="features", labelCol=LABEL_COL, **gbt_params)
+            t_a = time.time()
+            fitted = Pipeline(stages=[asm, est]).fit(train_df)
+            sec = time.time() - t_a
+            a_train_mae, a_train_rmse = evaluate_model(fitted, train_df, model_name=f"{name}-train")
+            a_mae, a_rmse = evaluate_model(fitted, val_df, model_name=name)
+            ablation_rows.append({
+                "model": name,
+                "description": desc,
+                "n_features": len(cols),
+                "train_mae": a_train_mae,
+                "train_rmse": a_train_rmse,
+                "val_mae": a_mae,
+                "val_rmse": a_rmse,
+                "train_sec": round(sec, 1),
+            })
+            if cols == FEATURE_COLS:
+                gbt_pipeline_model = fitted  # the full-weather model is the one served
+                gbt_train_mae, gbt_train_rmse = a_train_mae, a_train_rmse
+                gbt_mae, gbt_rmse = a_mae, a_rmse
+
+        import pandas as pd
+        ablation = pd.DataFrame(ablation_rows)
+        no_wx = ablation.loc[ablation["model"] == "gbt_no_weather", "val_mae"].iloc[0]
+        ablation["mae_gain_vs_no_weather_pct"] = ((no_wx - ablation["val_mae"]) / no_wx * 100).round(2)
+        ablation[["train_mae", "train_rmse", "val_mae", "val_rmse"]] = (
+            ablation[["train_mae", "train_rmse", "val_mae", "val_rmse"]].round(4)
         )
-        t_a = time.time()
-        fitted = Pipeline(stages=[asm, est]).fit(train_df)
-        sec = time.time() - t_a
-        a_mae, a_rmse = evaluate_model(fitted, val_df, model_name=name)
-        ablation_rows.append({"model": name, "description": desc, "n_features": len(cols),
-                              "val_mae": a_mae, "val_rmse": a_rmse, "train_sec": round(sec, 1)})
-        if cols == FEATURE_COLS:
-            gbt_pipeline_model = fitted  # the full-weather model is the one served
+        ablation["train_years"] = ",".join(map(str, train_years))
+        ablation["val_year"] = val_year
+        ablation_path = models_dir / "ablation.csv"
+        ablation.to_csv(ablation_path, index=False)
+        print(f"[SAVE] Ablation table -> {ablation_path}")
 
-    import pandas as pd
-    ablation = pd.DataFrame(ablation_rows)
-    no_wx = ablation.loc[ablation["model"] == "gbt_no_weather", "val_mae"].iloc[0]
-    ablation["mae_gain_vs_no_weather_pct"] = ((no_wx - ablation["val_mae"]) / no_wx * 100).round(2)
-    ablation[["val_mae", "val_rmse"]] = ablation[["val_mae", "val_rmse"]].round(4)
-    ablation["train_years"] = ",".join(map(str, train_years))
-    ablation["val_year"] = val_year
-    ablation_path = models_dir / "ablation.csv"
-    ablation.to_csv(ablation_path, index=False)
-    print(f"[SAVE] Ablation table -> {ablation_path}")
+    gbt_overfit_gap_mae = gbt_mae - gbt_train_mae
+    gbt_overfit_gap_rmse = gbt_rmse - gbt_train_rmse
+    print(
+        f"  [GBT Generalization] Train MAE={gbt_train_mae:.3f}  Val MAE={gbt_mae:.3f}  "
+        f"Gap (val - train)={gbt_overfit_gap_mae:+.3f} min  "
+        f"(RMSE gap={gbt_overfit_gap_rmse:+.3f} min)"
+    )
 
-    gbt_mae, gbt_rmse = evaluate_model(gbt_pipeline_model, val_df, model_name="GBT")
-    gbt_model_path = str(models_dir / "gbt_pipeline_v1")
-    gbt_pipeline_model.write().overwrite().save(gbt_model_path)
-    print(f"[SAVE] GBT PipelineModel -> {gbt_model_path}")
+    if not args.no_save_model:
+        gbt_model_path = str(models_dir / "gbt_pipeline_v1")
+        gbt_pipeline_model.write().overwrite().save(gbt_model_path)
+        print(f"[SAVE] GBT PipelineModel -> {gbt_model_path}")
+    else:
+        print("[SKIP] --no-save-model set; skipping gbt_pipeline_v1 write")
 
+    rf_train_mae, rf_train_rmse = None, None
     rf_mae, rf_rmse = None, None
     if not args.skip_rf:
         print("\n[TRAIN] Training RandomForestRegressor Pipeline...")
-        rf = RandomForestRegressor(
-            featuresCol="features",
-            labelCol=LABEL_COL,
-            numTrees=cfg["training"]["rf_num_trees"],
-            seed=cfg["training"]["seed"],
-        )
+        rf_kwargs = {
+            "numTrees": args.rf_num_trees if args.rf_num_trees is not None else cfg["training"]["rf_num_trees"],
+            "seed": int(cfg["training"].get("seed", 42)),
+        }
+        rf_max_depth = args.rf_max_depth if args.rf_max_depth is not None else cfg["training"].get("rf_max_depth")
+        if rf_max_depth is not None:
+            rf_kwargs["maxDepth"] = int(rf_max_depth)
+        rf = RandomForestRegressor(featuresCol="features", labelCol=LABEL_COL, **rf_kwargs)
         rf_pipeline = Pipeline(stages=[assembler, rf])
         t_rf = time.time()
         rf_pipeline_model = rf_pipeline.fit(train_df)
         print(f"  RF training time: {time.time()-t_rf:.1f}s")
-        rf_mae, rf_rmse = evaluate_model(rf_pipeline_model, val_df, model_name="RandomForest")
-
-        rf_model_path = str(models_dir / "rf_pipeline_v1")
-        rf_pipeline_model.write().overwrite().save(rf_model_path)
-        print(f"[SAVE] RF PipelineModel -> {rf_model_path}")
+        rf_train_mae, rf_train_rmse = evaluate_model(rf_pipeline_model, train_df, model_name="RandomForest-Train")
+        rf_mae, rf_rmse = evaluate_model(rf_pipeline_model, val_df, model_name="RandomForest-Val")
+        print(
+            f"  [RF Generalization]  Train MAE={rf_train_mae:.3f}  Val MAE={rf_mae:.3f}  "
+            f"Gap (val - train)={rf_mae - rf_train_mae:+.3f} min"
+        )
+        if not args.no_save_model:
+            rf_model_path = str(models_dir / "rf_pipeline_v1")
+            rf_pipeline_model.write().overwrite().save(rf_model_path)
+            print(f"[SAVE] RF PipelineModel -> {rf_model_path}")
 
     metrics = {
+        "hub_count": len(airports),
         "train_count": train_count,
         "val_count": val_count,
         **baseline_metrics,
+        "gbt_params": gbt_params,
+        "gbt_train_mae": gbt_train_mae,
+        "gbt_train_rmse": gbt_train_rmse,
         "gbt_mae": gbt_mae,
         "gbt_rmse": gbt_rmse,
+        "gbt_overfit_gap_mae": gbt_overfit_gap_mae,
+        "gbt_overfit_gap_rmse": gbt_overfit_gap_rmse,
         "gbt_feature_importances": dict(zip(
             FEATURE_COLS, gbt_pipeline_model.stages[-1].featureImportances.toArray().tolist()
         )),
+        "rf_train_mae": rf_train_mae,
+        "rf_train_rmse": rf_train_rmse,
         "rf_mae": rf_mae,
         "rf_rmse": rf_rmse,
         "train_years": train_years,
         "val_year": val_year,
         "total_elapsed_sec": time.time() - t0,
     }
-    metrics_path = models_dir / "training_metrics.json"
+    metrics_path = Path(args.metrics_out) if args.metrics_out else (models_dir / "training_metrics.json")
+    metrics_path.parent.mkdir(parents=True, exist_ok=True)
     with open(metrics_path, "w") as f:
         json.dump(metrics, f, indent=2)
     print(f"\n[SAVE] Metrics -> {metrics_path}")

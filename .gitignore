@@ -6,12 +6,17 @@ data/*
 !data/sample/README.md
 *.zip
 *.parquet
+!models/*.parquet
+!models/*.parquet/**
+!models/**/*
+*.crc
 
 # Operating System files
 .DS_Store
 .AppleDouble
 .LSOverride
 Thumbs.db
+.Rhistory
 
 # Python & Virtual Environments
 __pycache__/
@@ -38,11 +43,6 @@ spark-warehouse/
 
 # Benchmark results (keep summary, ignore raw jsonl)
 benchmark/results/*.jsonl
-
-# Models (large binary artifacts)
-models/gbt_pipeline_v1/
-models/rf_pipeline_v1/
-models/lane_mean.parquet
 
 # Environment
 .env

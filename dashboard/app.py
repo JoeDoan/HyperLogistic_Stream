@@ -27,37 +27,15 @@ import streamlit as st
 import plotly.express as px
 import plotly.graph_objects as go
 
-from live_radar import render_live_radar
-
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-CONFIG_PATH = PROJECT_ROOT / "config" / "pipeline_config.yaml"
+for _p in (PROJECT_ROOT, PROJECT_ROOT / "dashboard"):
+    if str(_p) not in sys.path:
+        sys.path.insert(0, str(_p))
 
-HUB_COORDS = {
-    "ATL": (33.6407, -84.4277, "Atlanta Hartsfield"),
-    "ORD": (41.9742, -87.9073, "Chicago O'Hare"),
-    "DFW": (32.8998, -97.0403, "Dallas/Fort Worth"),
-    "DEN": (39.8561, -104.6737, "Denver"),
-    "LAX": (33.9425, -118.4081, "Los Angeles"),
-    "JFK": (40.6413, -73.7781, "New York JFK"),
-    "EWR": (40.6895, -74.1745, "Newark Liberty"),
-    "SFO": (37.6213, -122.3790, "San Francisco"),
-    "MEM": (35.0424, -89.9767, "Memphis (FedEx Hub)"),
-    "SDF": (38.1744, -85.7360, "Louisville (UPS Hub)"),
-    "CVG": (39.0489, -84.6678, "Cincinnati (Amazon Air)"),
-    "CLT": (35.2140, -80.9431, "Charlotte Douglas"),
-    "LAS": (36.0840, -115.1537, "Las Vegas"),
-    "PHX": (33.4352, -112.0101, "Phoenix Sky Harbor"),
-    "MIA": (25.7959, -80.2870, "Miami"),
-    "IAH": (29.9844, -95.3414, "Houston"),
-    "BOS": (42.3656, -71.0096, "Boston Logan"),
-    "SEA": (47.4502, -122.3088, "Seattle-Tacoma"),
-    "MSP": (44.8848, -93.2223, "Minneapolis"),
-    "DTW": (42.2162, -83.3554, "Detroit Metro"),
-    "PHL": (39.8744, -75.2424, "Philadelphia"),
-    "BWI": (39.1774, -76.6684, "Baltimore/Washington"),
-    "SLC": (40.7899, -111.9791, "Salt Lake City"),
-    "MCO": (28.4312, -81.3081, "Orlando"),
-}
+from config.hubs import HUB_COORDS_NAMED as HUB_COORDS  # noqa: E402
+from live_radar import render_live_radar  # noqa: E402
+
+CONFIG_PATH = PROJECT_ROOT / "config" / "pipeline_config.yaml"
 
 
 def load_config():
