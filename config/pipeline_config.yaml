@@ -72,6 +72,22 @@ airports:
   BWI: "America/New_York"
   SLC: "America/Denver"
   MCO: "America/New_York"
+  IND: "America/Indiana/Indianapolis"
+  ONT: "America/Los_Angeles"
+  MCI: "America/Chicago"
+  STL: "America/Chicago"
+  IAD: "America/New_York"
+  DCA: "America/New_York"
+  SAN: "America/Los_Angeles"
+  TPA: "America/New_York"
+  AUS: "America/Chicago"
+  BNA: "America/Chicago"
+  RDU: "America/New_York"
+  PDX: "America/Los_Angeles"
+  SMF: "America/Los_Angeles"
+  MKE: "America/Chicago"
+  PIT: "America/New_York"
+  CLE: "America/New_York"
 
 producer:
   default_rate_eps: 1000       # events per second

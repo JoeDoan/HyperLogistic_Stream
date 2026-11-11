@@ -337,7 +337,8 @@ def test_build_fleet_map_figure_locks_usa_scope_and_vectorizes_routes(dash):
         dest = hubs[(i * 7 + 1) % len(hubs)]
         if origin == dest:
             dest = hubs[(i + 2) % len(hubs)]
-        delta = -3.0 if i % 3 == 0 else (10.0 if i % 3 == 1 else 42.0)
+        bucket = (i % len(hubs)) % 3
+        delta = -3.0 if bucket == 0 else (10.0 if bucket == 1 else 42.0)
         rows.append({
             "flight_id": f"FL_{i:04d}",
             "origin": origin,

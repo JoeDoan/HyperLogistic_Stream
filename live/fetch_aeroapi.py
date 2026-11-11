@@ -18,22 +18,14 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-sys.path.insert(0, os.path.dirname(__file__))
+if os.path.dirname(__file__) not in sys.path:
+    sys.path.insert(0, os.path.dirname(__file__))
 from _common import HUBS, PROJECT_ROOT, RateLimitError, dump_json, http_get, now_iso  # noqa: E402
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+from config.hubs import HUB_COORDS_LATLON as HUB_COORDS  # noqa: E402
 
 AEROAPI_BASE = "https://aeroapi.flightaware.com/aeroapi"
-
-# Same 24 US hubs as dashboard/app.py and pipeline/04_live_processor.py
-HUB_COORDS = {
-    "ATL": (33.6407, -84.4277), "ORD": (41.9742, -87.9073), "DFW": (32.8998, -97.0403),
-    "DEN": (39.8561, -104.6737), "LAX": (33.9425, -118.4081), "JFK": (40.6413, -73.7781),
-    "EWR": (40.6895, -74.1745), "SFO": (37.6213, -122.3790), "MEM": (35.0424, -89.9767),
-    "SDF": (38.1744, -85.7360), "CVG": (39.0489, -84.6678), "CLT": (35.2140, -80.9431),
-    "LAS": (36.0840, -115.1537), "PHX": (33.4352, -112.0101), "MIA": (25.7959, -80.2870),
-    "IAH": (29.9844, -95.3414), "BOS": (42.3656, -71.0096), "SEA": (47.4502, -122.3088),
-    "MSP": (44.8848, -93.2223), "DTW": (42.2162, -83.3554), "PHL": (39.8744, -75.2424),
-    "BWI": (39.1774, -76.6684), "SLC": (40.7899, -111.9791), "MCO": (28.4312, -81.3081),
-}
 
 
 def _load_env_key(var_name: str = "AEROAPI_KEY") -> str | None:

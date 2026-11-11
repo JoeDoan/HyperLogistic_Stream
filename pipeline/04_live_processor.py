@@ -46,19 +46,12 @@ from pyspark.sql.types import (
 )
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-CONFIG_PATH = PROJECT_ROOT / "config" / "pipeline_config.yaml"
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
-# Hub coordinates (same hubs as dashboard/app.py HUB_COORDS).
-HUBS = {
-    "ATL": (33.6407, -84.4277), "ORD": (41.9742, -87.9073), "DFW": (32.8998, -97.0403),
-    "DEN": (39.8561, -104.6737), "LAX": (33.9425, -118.4081), "JFK": (40.6413, -73.7781),
-    "EWR": (40.6895, -74.1745), "SFO": (37.6213, -122.3790), "MEM": (35.0424, -89.9767),
-    "SDF": (38.1744, -85.7360), "CVG": (39.0489, -84.6678), "CLT": (35.2140, -80.9431),
-    "LAS": (36.0840, -115.1537), "PHX": (33.4352, -112.0101), "MIA": (25.7959, -80.2870),
-    "IAH": (29.9844, -95.3414), "BOS": (42.3656, -71.0096), "SEA": (47.4502, -122.3088),
-    "MSP": (44.8848, -93.2223), "DTW": (42.2162, -83.3554), "PHL": (39.8744, -75.2424),
-    "BWI": (39.1774, -76.6684), "SLC": (40.7899, -111.9791), "MCO": (28.4312, -81.3081),
-}
+from config.hubs import AIRPORT_TZ, HUB_COORDS_LATLON as HUBS  # noqa: E402
+
+CONFIG_PATH = PROJECT_ROOT / "config" / "pipeline_config.yaml"
 
 COMMON = [
     StructField("fetched_at", StringType(), True),
@@ -102,18 +95,6 @@ FLIGHT_SCHEMA = StructType([
     StructField("velocity_ms", DoubleType(), True),
     StructField("vertical_rate", DoubleType(), True),
 ] + COMMON)
-
-
-AIRPORT_TZ = {
-    'ATL': 'America/New_York', 'ORD': 'America/Chicago', 'DFW': 'America/Chicago',
-    'DEN': 'America/Denver', 'LAX': 'America/Los_Angeles', 'JFK': 'America/New_York',
-    'EWR': 'America/New_York', 'SFO': 'America/Los_Angeles', 'MEM': 'America/Chicago',
-    'SDF': 'America/New_York', 'CVG': 'America/New_York', 'CLT': 'America/New_York',
-    'LAS': 'America/Los_Angeles', 'PHX': 'America/Phoenix', 'MIA': 'America/New_York',
-    'IAH': 'America/Chicago', 'BOS': 'America/New_York', 'SEA': 'America/Los_Angeles',
-    'MSP': 'America/Chicago', 'DTW': 'America/New_York', 'PHL': 'America/New_York',
-    'BWI': 'America/New_York', 'SLC': 'America/Denver', 'MCO': 'America/New_York',
-}
 
 
 def load_config(path=None):

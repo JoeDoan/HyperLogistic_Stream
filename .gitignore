@@ -12,6 +12,7 @@ data/*
 .AppleDouble
 .LSOverride
 Thumbs.db
+.Rhistory
 
 # Python & Virtual Environments
 __pycache__/

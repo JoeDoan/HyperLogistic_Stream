@@ -31,26 +31,17 @@ import plotly.graph_objects as go
 import streamlit as st
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-if str(PROJECT_ROOT / "live") not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT / "live"))
+for _p in (PROJECT_ROOT, PROJECT_ROOT / "live"):
+    if str(_p) not in sys.path:
+        sys.path.insert(0, str(_p))
 from aeroapi_predictor import enrich_and_score_live_flights, evaluate_live_vs_historical  # noqa: E402
+from config.hubs import AIRPORT_TZ  # noqa: E402
 
 GOLD_LIVE = PROJECT_ROOT / "data" / "gold" / "live"
 RECORD_DIR = PROJECT_ROOT / "data" / "live_recordings"
 SAMPLE_DIR = PROJECT_ROOT / "data" / "sample"
 LIVE_SAMPLES_DIR = PROJECT_ROOT / "data" / "live_samples"
 BASELINE_CSV = PROJECT_ROOT / "models" / "baseline_hub_hour_dow.csv"  # written by 01_batch_train.py
-
-AIRPORT_TZ = {
-    'ATL': 'America/New_York', 'ORD': 'America/Chicago', 'DFW': 'America/Chicago',
-    'DEN': 'America/Denver', 'LAX': 'America/Los_Angeles', 'JFK': 'America/New_York',
-    'EWR': 'America/New_York', 'SFO': 'America/Los_Angeles', 'MEM': 'America/Chicago',
-    'SDF': 'America/New_York', 'CVG': 'America/New_York', 'CLT': 'America/New_York',
-    'LAS': 'America/Los_Angeles', 'PHX': 'America/Phoenix', 'MIA': 'America/New_York',
-    'IAH': 'America/Chicago', 'BOS': 'America/New_York', 'SEA': 'America/Los_Angeles',
-    'MSP': 'America/Chicago', 'DTW': 'America/New_York', 'PHL': 'America/New_York',
-    'BWI': 'America/New_York', 'SLC': 'America/Denver', 'MCO': 'America/New_York',
-}
 
 RADIUS_KM = 100.0
 STALE_AFTER_S = 180          # data older than this is shown as STALE

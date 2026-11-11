@@ -35,6 +35,11 @@ from pyspark.sql.types import (
 )
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from config.hubs import AIRPORT_TZ  # noqa: E402
+
 CONFIG_PATH = PROJECT_ROOT / "config" / "pipeline_config.yaml"
 
 FLIGHT_SCHEMA = StructType([
@@ -52,17 +57,6 @@ FLIGHT_SCHEMA = StructType([
     StructField("emit_epoch_ms", LongType(), True),
     StructField("emit_ts", StringType(), True),
 ])
-
-AIRPORT_TZ = {
-    'ATL': 'America/New_York', 'ORD': 'America/Chicago', 'DFW': 'America/Chicago',
-    'DEN': 'America/Denver', 'LAX': 'America/Los_Angeles', 'JFK': 'America/New_York',
-    'EWR': 'America/New_York', 'SFO': 'America/Los_Angeles', 'MEM': 'America/Chicago',
-    'SDF': 'America/New_York', 'CVG': 'America/New_York', 'CLT': 'America/New_York',
-    'LAS': 'America/Los_Angeles', 'PHX': 'America/Phoenix', 'MIA': 'America/New_York',
-    'IAH': 'America/Chicago', 'BOS': 'America/New_York', 'SEA': 'America/Los_Angeles',
-    'MSP': 'America/Chicago', 'DTW': 'America/New_York', 'PHL': 'America/New_York',
-    'BWI': 'America/New_York', 'SLC': 'America/Denver', 'MCO': 'America/New_York',
-}
 
 
 def load_config(config_path: str = None):

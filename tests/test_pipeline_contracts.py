@@ -1,10 +1,12 @@
 """Pure-Python train/serve parity, model-loading guard, and Spark UTC contracts."""
+import argparse
 import ast
 from datetime import datetime
 import importlib.util
 from pathlib import Path
 
 import pytest
+import yaml
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -126,3 +128,153 @@ def test_stream_schema_and_dayofweek_parity_contracts():
     assert '--allow-dummy-model' in stream_src
     assert 'F.to_date(F.col("flight_date"), "yyyy-MM-dd")' in stream_src
     assert "F.coalesce(" in stream_src
+
+
+def test_colab_config_driver_memory_40_hubs_and_gbt_tuning_keys():
+    cfg = yaml.safe_load((ROOT / "config" / "pipeline_config_colab.yaml").read_text(encoding="utf-8"))
+    assert cfg["spark"]["driver_memory"] == "24g"
+    assert len(cfg["airports"]) == 40
+    training = cfg["training"]
+    assert training["gbt_max_iter"] == 50
+    assert training["gbt_max_depth"] == 5
+    assert training["gbt_step_size"] == 0.1
+    assert training["gbt_subsampling_rate"] == 1.0
+    assert training["gbt_min_instances_per_node"] == 1
+    assert training["gbt_max_bins"] == 32
+    assert training["seed"] == 42
+
+
+def test_batch_train_gbt_tuning_overfit_and_cache_contracts():
+    src = (ROOT / "pipeline" / "01_batch_train.py").read_text(encoding="utf-8")
+    tree = ast.parse(src)
+    assert "RegressionEvaluator" not in src
+
+    resolve_fn_node = None
+    cli_flags = set()
+    metrics_keys = set()
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef) and node.name == "resolve_gbt_params":
+            resolve_fn_node = node
+        elif (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "add_argument"
+            and node.args
+            and isinstance(node.args[0], ast.Constant)
+        ):
+            cli_flags.add(node.args[0].value)
+        elif isinstance(node, ast.Assign):
+            for target in node.targets:
+                if isinstance(target, ast.Name) and target.id == "metrics" and isinstance(node.value, ast.Dict):
+                    metrics_keys.update(
+                        k.value for k in node.value.keys if isinstance(k, ast.Constant)
+                    )
+
+    assert resolve_fn_node is not None, "resolve_gbt_params missing from 01_batch_train.py"
+
+    mod_ast = ast.Module(body=[resolve_fn_node], type_ignores=[])
+    ast.fix_missing_locations(mod_ast)
+    ns: dict = {}
+    exec(compile(mod_ast, "01_batch_train.py", "exec"), ns)
+    resolve_gbt_params = ns["resolve_gbt_params"]
+
+    empty_args = argparse.Namespace()
+    defaults = resolve_gbt_params({"gbt_max_iter": 50, "gbt_max_depth": 5}, empty_args)
+    assert defaults == {
+        "maxIter": 50,
+        "maxDepth": 5,
+        "stepSize": 0.1,
+        "subsamplingRate": 1.0,
+        "minInstancesPerNode": 1,
+        "maxBins": 32,
+        "seed": 42,
+    }
+
+    override_args = argparse.Namespace(
+        gbt_max_iter=80,
+        gbt_max_depth=6,
+        gbt_step_size=0.05,
+        gbt_subsampling_rate=0.8,
+        gbt_min_instances=50,
+        gbt_max_bins=64,
+    )
+    overridden = resolve_gbt_params(
+        {"gbt_max_iter": 50, "gbt_max_depth": 5, "gbt_step_size": 0.1, "seed": 7},
+        override_args,
+    )
+    assert overridden == {
+        "maxIter": 80,
+        "maxDepth": 6,
+        "stepSize": 0.05,
+        "subsamplingRate": 0.8,
+        "minInstancesPerNode": 50,
+        "maxBins": 64,
+        "seed": 7,
+    }
+
+    expected_flags = {
+        "--skip-ablation",
+        "--gbt-max-iter",
+        "--gbt-max-depth",
+        "--gbt-step-size",
+        "--gbt-subsampling-rate",
+        "--gbt-min-instances",
+        "--gbt-max-bins",
+        "--rf-num-trees",
+        "--rf-max-depth",
+        "--cache-dir",
+        "--metrics-out",
+        "--no-save-model",
+    }
+    assert expected_flags.issubset(cli_flags)
+
+    expected_metrics_keys = {
+        "hub_count",
+        "train_count",
+        "val_count",
+        "gbt_params",
+        "gbt_train_mae",
+        "gbt_train_rmse",
+        "gbt_mae",
+        "gbt_rmse",
+        "gbt_overfit_gap_mae",
+        "gbt_overfit_gap_rmse",
+        "gbt_feature_importances",
+        "rf_train_mae",
+        "rf_train_rmse",
+        "rf_mae",
+        "rf_rmse",
+        "train_years",
+        "val_year",
+        "total_elapsed_sec",
+    }
+    assert expected_metrics_keys.issubset(metrics_keys)
+
+
+def test_error_analysis_forwards_driver_memory_and_shuffle_partitions():
+    src = (ROOT / "pipeline" / "04_error_analysis.py").read_text(encoding="utf-8")
+    tree = ast.parse(src)
+
+    cli_flags = set()
+    build_spark_kwargs = set()
+
+    for node in ast.walk(tree):
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "add_argument"
+            and node.args
+            and isinstance(node.args[0], ast.Constant)
+        ):
+            cli_flags.add(node.args[0].value)
+        elif (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "build_spark"
+        ):
+            build_spark_kwargs.update(kw.arg for kw in node.keywords if kw.arg is not None)
+
+    assert "--shuffle-partitions" in cli_flags
+    assert {"cores", "shuffle_partitions", "driver_memory"}.issubset(build_spark_kwargs)
+

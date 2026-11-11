@@ -13,24 +13,14 @@ import urllib.request
 from pathlib import Path
 from tqdm import tqdm
 
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from config.hubs import DEFAULT_ICAO_AIRPORTS as DEFAULT_AIRPORTS  # noqa: E402
+
 ISD_HISTORY_URL = "https://www.ncei.noaa.gov/pub/data/noaa/isd-history.csv"
 NOAA_S3_URL = "https://noaa-global-hourly-pds.s3.amazonaws.com/{year}/{station_id}.csv"
-
-# Top 40 US logistics & air passenger hubs
-DEFAULT_AIRPORTS = [
-    # Top cargo & express hubs
-    "KMEM",  # Memphis (FedEx SuperHub)
-    "KSDF",  # Louisville (UPS Worldport)
-    "KCVG",  # Cincinnati/Northern Kentucky (Amazon Air Hub & DHL)
-    "KIND",  # Indianapolis (FedEx secondary hub)
-    "KONT",  # Ontario, CA (major West coast freight hub)
-    # Major passenger / multi-modal hubs
-    "KATL", "KORD", "KDFW", "KDEN", "KLAX", "KJFK", "KEWR", "KSFO",
-    "KCLT", "KLAS", "KPHX", "KMIA", "KIAH", "KBOS", "KSEA", "KMSP",
-    "KDTW", "KPHL", "KBWI", "KSLC", "KDCA", "KIAD", "KSAN", "KTPA",
-    "KBNA", "KAUS", "KMCO", "KRDU", "KSMF", "KMKE", "KPIT", "KCLE",
-    "KSTL", "KMCI", "KPDX"  # KMCI is Kansas City
-]
 
 def download_file(url: str, dest_path: Path):
     """Download a file with progress bar."""

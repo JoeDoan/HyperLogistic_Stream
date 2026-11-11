@@ -6,6 +6,7 @@ Shared helpers for the live-data prototype scripts (stdlib only, no new dependen
 import email.utils
 import json
 import math
+import sys
 import time
 import urllib.error
 import urllib.request
@@ -13,17 +14,15 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from config.hubs import HUBS  # noqa: E402
+
 SAMPLES_DIR = PROJECT_ROOT / "data" / "live_samples"
 
 # NWS requires a identifying User-Agent. Put a real contact here.
 USER_AGENT = "HyperLogisticsStream/0.1 (CS5540 student project; mtuan82@gmail.com)"
-
-# Hub IATA codes (same set as the dashboard's HUB_COORDS keys).
-HUBS = [
-    "ATL", "ORD", "DFW", "DEN", "LAX", "JFK", "EWR", "SFO", "MEM", "SDF", "CVG",
-    "CLT", "LAS", "PHX", "MIA", "IAH", "BOS", "SEA", "MSP", "DTW", "PHL", "BWI",
-    "SLC", "MCO",
-]
 
 
 class RateLimitError(RuntimeError):
