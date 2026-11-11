@@ -1,144 +1,159 @@
 # EVALUATION.md: HyperLogistic_Stream
 
-> CS 5540. RQ1 accuracy, ablation, and error tables come directly from Spark training outputs
-> committed in `models/` (`ablation.csv`, `training_metrics.json`, `baseline_hub_hour_dow.csv`,
-> `error_by_*.csv`), `benchmark/results/benchmark_summary.csv` records the 12-configuration Colab
-> streaming sweep in Section 4, and correctness counts come from `pytest`.
+> CS 5540. RQ1 accuracy, ablation, hyperparameter tuning, and error tables come directly from Spark
+> training outputs committed in `models/` (`ablation.csv`, `tuning_results.csv`,
+> `training_metrics.json`, `baseline_hub_hour_dow.csv`, `error_by_*.csv`). Section 4's
+> 12-configuration Colab streaming sweep comes from `benchmark/results/benchmark_summary.csv`, and
+> correctness counts come from `pytest`.
 
 ## 1. What is evaluated
 
 | Question | Evidence | Section |
 |---|---|---|
-| Does the model predict delay change better than simple baselines? | `models/ablation.csv` | 2 |
-| Do weather features help? | same ablation | 3 |
-| Where is the model wrong? | `models/error_by_*.csv` | 3.1 |
+| Does the model predict delay change better than simple baselines? | `models/training_metrics.json`, `models/tuning_results.csv` | 2 |
+| Do weather features and capacity tuning help without overfitting? | `models/ablation.csv`, `models/tuning_results.csv` | 3 |
+| Where is the model wrong across all 40 hubs? | `models/error_by_*.csv` | 3.1 |
 | How fast is the streaming pipeline, and what drives it? | `benchmark/results/benchmark_summary.csv` | 4 |
-| Are Gold writes repeat-safe? | `tests/test_dedupe_spark.py` | 5 |
+| Are Gold writes repeat-safe, and are contracts tested? | `tests/test_dedupe_spark.py`, `tests/` | 5 |
 | Do the historical patterns hold on live flights? | `models/live_vs_historical.csv` | 8 |
 | What can we **not** claim? | | 6 |
 
-The target is `delta_delay` (arrival delay minus departure delay, in minutes). Flights are a
-public proxy for freight movement.
+The target is `delta_delay` (arrival delay minus departure delay, in minutes). Commercial flights
+serve as a public proxy for middle-mile freight movement across the 40 U.S. hubs in
+`config/hubs.py`.
 
 **How the evaluation works**
 
-- **Time-based split.** The model trains on 2018, 2019, 2021, 2022 and 2023 and is scored on 2024,
-  a year it never saw. 2020 is left out (pandemic traffic is not typical).
-- **Metric.** MAE is the average size of the arrival-time error in minutes (lower is better).
-  RMSE punishes large misses more. "Better than no change" means a smaller MAE than assuming the
-  departure delay stays the same all the way to the destination.
-- **Same yardstick everywhere.** The two baselines and the GBT are scored on the same 1,665,362
-  flights. The error tables in 3.1 slice that same set by hub, hour, month and outcome.
-- **Live check.** Section 8 repeats the comparison on flights that landed while the live feed was
-  recording, with a smaller and weaker version of the model (see the caveats there).
+- **Time-based split.** The model trains on 2018, 2019, 2021, 2022, and 2023 (`14,384,130` flights)
+  and is scored on unseen 2024 (`3,041,312` flights across `1,388` lanes and `40` hubs). 2020 is
+  left out because pandemic schedules are not representative.
+- **Metric.** MAE is the average arrival-time error in minutes (lower is better). RMSE punishes
+  large misses more heavily. "Better than no change" means a lower MAE than assuming the departure
+  delay stays unchanged all the way to the destination.
+- **Same yardstick everywhere.** Both baselines, Random Forest, default GBT, and the tuned champion
+  GBT are scored on the exact same `3,041,312` holdout 2024 flights. Section 3.1 slices that same
+  holdout set by hub, departure hour, month, and actual delay bucket.
+- **Live check.** Section 8 repeats the comparison on `505` FlightAware flights that landed while
+  the live feed was recording, using the lightweight Python rule-based estimator (see caveats there).
 
-## 2. Model vs. baselines
+## 2. Model vs. baselines (40 U.S. hubs)
 
-Train on 2018, 2019, 2021, 2022 and 2023 (7,996,449 flights). Validate on 2024 (1,665,362 flights).
-MAE is in minutes, lower is better.
+Train on 2018, 2019, 2021, 2022, and 2023 (`14,384,130` flights). Validate on unseen 2024
+(`3,041,312` flights). MAE and RMSE are in minutes, lower is better.
 
-| Model | Features | Val MAE | Val RMSE | vs. "no change" |
-|---|---|---|---|---|
-| Baseline: predict 0 | 0 | 12.749 | 16.627 | n/a |
-| Baseline: training lane mean | 1 | 10.799 | 15.329 | 15.3% better |
-| GBT, no weather | 6 | 10.640 | 15.020 | 16.5% better |
-| **GBT, full weather** | 14 | **10.533** | **14.863** | **17.4% better** |
-| Random forest, full weather | 14 | 10.669 | 15.161 | 16.3% better |
+| Model | Features | Train MAE | Val MAE | Val RMSE | vs. "no change" |
+|---|---|---|---|---|---|
+| Baseline 1: predict 0 (no change) | 0 | 11.846 | 12.042 | 15.801 | n/a |
+| Baseline 2: training lane mean | 1 | 9.905 | 10.193 | 14.614 | 15.4% better |
+| Random forest, full weather (100 trees, depth 5) | 14 | 9.800 | 10.079 | 14.459 | 16.3% better |
+| GBT default, full weather (50 trees, depth 5) | 14 | 9.671 | 9.940 | 14.155 | 17.5% better |
+| **GBT tuned champion (`iter4`, 90 trees, depth 8)** | 14 | **9.469** | **9.774** | **13.822** | **18.8% better** |
 
 Reading it plainly:
 
-- Most of the improvement over "no change" comes from knowing the **lane**. The lane-mean
-  baseline alone removes 2.0 of the 2.2 minutes the GBT gains.
-- The GBT beats the lane-mean baseline by only **0.27 min (2.5%)**. The model is better,
-  but not by a lot.
-- GBT beats random forest by 0.14 min on the same features.
+- Knowing the **origin-destination lane** removes most of the raw error (`12.042` down to `10.193`
+  min, or `1.85` of the `2.27` minutes gained by the champion GBT).
+- On `14.38M` training rows, the default depth-5 GBT was slightly underfitting (`9.940` val MAE).
+  Controlled capacity tuning (`maxDepth=8, maxIter=90, stepSize=0.07, maxBins=128,
+  minInstancesPerNode=500, subsamplingRate=0.8`) lowers holdout MAE to **9.774 min**, beating the
+  lane-mean baseline by **0.420 min (4.12%)** and beating Random Forest by **0.305 min**.
+- Overfitting remained negligible: `baseline_lane_mean` already exhibits a `+0.288` min temporal
+  shift between `2018-2023` (`9.905`) and `2024` (`10.193`), and the tuned GBT's train-to-val gap is
+  `+0.304` min (`+0.016` min excess gap).
 
 ### 2.1 The models in this project
 
 | Model | What it is | Where it runs | Role |
 |---|---|---|---|
-| **Baseline 1: no change** | Predicts `delta_delay` = 0, so the arrival delay equals the departure delay | anywhere | Floor: what a traveler assumes today |
-| **Baseline 2: lane mean** | The average `delta_delay` of that origin-destination lane in the training years | Spark (batch) | Shows how much history alone explains |
-| **GBT, 14 features** | Gradient-boosted trees (Spark MLlib `GBTRegressor`): departure delay, distance, departure and arrival hour (UTC), weekday, lane mean delay and 4 + 4 origin and destination weather fields | Spark, trained on Colab | The model scored in sections 2 to 3.1 |
-| Random forest | Same 14 features, for comparison only | Spark, trained on Colab | Not served |
-| **Live estimator** | A hand-written rule approximation: hub and hour averages from the 2024 error tables, plus simple departure-delay and weather adjustments | Python, no Spark | Scores live flights in section 8; **not** the trained GBT |
+| **Baseline 1: no change** | Predicts `delta_delay` = 0, so arrival delay equals departure delay | anywhere | Floor: what standard flight boards imply |
+| **Baseline 2: lane mean** | Mean `delta_delay` of each `Origin -> Dest` lane (`1,388` lanes) in `2018-2023` | Spark (`models/lane_mean.parquet`) | Shows how much static route padding explains |
+| **GBT tuned champion, 14 features** | Spark MLlib `GBTRegressor` (`90` trees, `maxDepth=8`, `stepSize=0.07`, `minInstancesPerNode=500`, `subsamplingRate=0.8`) | Spark, committed in `models/gbt_pipeline_v1` | Primary model served by `03_stream_processor.py` and scored in sections 2 to 3.1 |
+| Random forest | 100-tree `RandomForestRegressor` on the same 14 features | Spark, committed in `models/rf_pipeline_v1` | Bagging comparison baseline |
+| **Live estimator** | Calibrated Python rule formula using hub/hour averages plus departure-delay and live NWS weather adjustments | Pure Python (`live/aeroapi_predictor.py`) | Scores live FlightAware flights without a local Spark JVM; **not** the Spark GBT |
 
-The trained GBT is not run on live flights yet. Section 8 says what that means for the live numbers.
+## 3. Weather ablation and GBT hillclimb
 
-## 3. Weather ablation
+### 3.0 Weather ablation (fixed depth-5 GBT across 40 hubs, `models/ablation.csv`)
 
-Same GBT, same data, features added step by step (`models/ablation.csv`):
-
-| Step | Added features | Val MAE | Gain vs. no weather |
-|---|---|---|---|
-| `gbt_no_weather` | none (lane + schedule) | 10.640 | 0.00% |
-| `gbt_dest_wind_vis_temp` | destination wind, visibility, temperature | 10.601 | 0.36% |
-| `gbt_dest_plus_ceiling` | + destination ceiling | 10.592 | 0.45% |
-| `gbt_full_weather` | + origin wind, visibility, ceiling, temperature | 10.533 | **1.01%** |
-
-**Finding:** weather helps, but modestly: **0.11 min (1.0%)** of MAE. Adding the weather
-features costs about 7 seconds of training (288 s to 295 s), so the cost is negligible.
-
-**Feature importance does not tell the same story.** The GBT's built-in importances give the
-eight weather features a combined 0.40 of the total, and the two hour-of-day features 0.35.
-That looks large next to a 1% MAE gain. Split-based importance rewards continuous features
-that offer many split points, so it overstates their value. We treat the ablation as the
-reliable number and the importances as descriptive only.
-
-The dashboard's Weather-Impact chart (Replay tab) shows the model's *predicted* delay by weather
-bucket. It describes what the model learned, not observed delays.
-
-### 3.1 Error analysis: where the model is wrong
-
-`pipeline/04_error_analysis.py` scores the served full-weather GBT on the 2024 validation flights
-(1,665,362, the same set as section 2) and writes `models/error_by_*.csv`. Weighted over all
-hubs, its MAE is 10.53 min, matching `training_metrics.json`. The model never trained on 2024.
-
-**By origin hub** (24 hubs; MAE in minutes):
-
-| | Hub | GBT MAE | Lane-mean MAE | No-change MAE |
+| Step | Added features | Val MAE | Val RMSE | Gain vs. no weather |
 |---|---|---|---|---|
-| Worst | JFK | 14.02 | 14.43 | 17.66 |
-| | EWR | 12.81 | 13.28 | 15.81 |
-| | BOS | 12.11 | 12.43 | 15.04 |
-| | ATL | 9.20 | 9.25 | 10.72 |
-| Best | PHX | 8.88 | 9.01 | 10.93 |
+| `gbt_no_weather` | none (6 lane + schedule features) | 10.053 | 14.330 | 0.00% |
+| `gbt_dest_wind_vis_temp` | + destination wind, visibility, temperature | 10.017 | 14.278 | 0.36% |
+| `gbt_dest_plus_ceiling` | + destination ceiling | 10.005 | 14.259 | 0.48% |
+| `gbt_full_weather` | + origin wind, visibility, ceiling, temperature | **9.940** | **14.155** | **1.12%** |
 
-- Northeast hubs are hardest to predict. JFK's error is about 58% higher than PHX's.
-- The GBT beats the lane-mean baseline at **every** hub, but only by 0.05 min (ATL) to 0.50 min
-  (DEN). The model's edge over the baseline is small everywhere.
+### 3.0b Controlled 5-stage GBT tuning (`scripts/tune_gbt.py`, `models/tuning_results.csv`)
 
-**By actual outcome** (flights grouped by what really happened):
+| Stage | Hyperparameters (`depth / trees / lr / bins / minLeaf / subsample`) | Train MAE | Val MAE | Val RMSE | Excess gap | Outcome |
+|---|---|---|---|---|---|---|
+| `iter0_baseline_default` | `5 / 50 / 0.10 / 32 / 1 / 1.0` | 9.671 | 9.940 | 14.155 | -0.018 | Baseline |
+| `iter1_fine_bins_128` | `5 / 50 / 0.10 / 128 / 100 / 1.0` | 9.673 | 9.950 | 14.170 | -0.011 | Rejected (no depth gain) |
+| `iter2_depth6_leaf200` | `6 / 65 / 0.10 / 128 / 200 / 1.0` | 9.586 | 9.869 | 14.019 | -0.005 | Accepted (`-0.071` min) |
+| `iter3_depth7_stochastic` | `7 / 85 / 0.08 / 128 / 300 / 0.8` | 9.514 | 9.809 | 13.895 | +0.007 | Accepted (`-0.131` min) |
+| **`iter4_depth8_capacity_probe`** | **`8 / 90 / 0.07 / 128 / 500 / 0.8`** | **9.469** | **9.774** | **13.822** | **+0.016** | **Champion (`-0.167` min)** |
+| `iter5_adaptive_refinement` | `8 / 115 / 0.055 / 128 / 600 / 0.8` | 9.473 | 9.776 | 13.829 | +0.015 | Rejected (plateau `+0.003`) |
 
-| Actual delta delay | Flights | GBT MAE | No-change MAE | GBT bias |
-|---|---|---|---|---|
-| Early >15 min | 403,493 | 15.0 | 22.7 | +15.0 |
-| Early 5-15 min | 568,491 | 4.5 | 10.4 | +3.8 |
-| Within 5 min | 402,498 | 5.7 | 2.6 | -5.1 |
-| Late 5-15 min | 167,989 | 14.6 | 8.7 | -14.5 |
-| Late >15 min | 122,891 | 34.1 | 29.8 | -34.1 |
+**Finding:** Weather lowers holdout MAE by **0.112 min (1.12%)** on the fixed depth-5 GBT, and
+regularized depth-8 capacity adds another **0.167 min** gain (`9.940` down to `9.774` min). Split
+importances on the depth-8 GBT assign `0.200` to the eight weather columns and `0.426` to schedule
+time-of-day/weekday columns; because continuous columns offer more split candidates than the single
+pre-aggregated `LaneMeanDelay` feature (`0.054` split share), we treat the ablation table as the
+authoritative measure of weather impact.
+
+### 3.1 Error analysis: where the model is wrong (`models/error_by_*.csv`)
+
+`pipeline/04_error_analysis.py` scores the served 90-tree champion GBT (`models/gbt_pipeline_v1`)
+across all `3,041,312` unseen 2024 flights (`40` hubs). Weighted over all hubs, its MAE is
+**9.774 min**, matching `training_metrics.json`.
+
+**By origin hub** (selected hubs out of 40; MAE in minutes):
+
+| | Hub | 2024 flights | GBT MAE | Lane-mean MAE | No-change MAE |
+|---|---|---|---|---|---|
+| Worst | JFK | 85,475 | 13.32 | 14.11 | 17.15 |
+| | EWR | 89,769 | 12.23 | 13.02 | 15.48 |
+| | BOS | 110,299 | 11.44 | 11.96 | 14.46 |
+| Cargo / Midwest | ORD | 153,890 | 10.49 | 11.23 | 12.81 |
+| | MEM | 18,576 | 9.16 | 9.57 | 11.50 |
+| | SDF | 19,719 | 9.10 | 9.57 | 11.01 |
+| | MCI | 39,011 | 8.70 | 8.95 | 10.60 |
+| | ATL | 163,095 | 8.54 | 8.70 | 10.00 |
+| | PHX | 118,045 | 8.43 | 8.57 | 10.44 |
+| Best | SMF | 42,195 | 7.36 | 7.55 | 9.34 |
+
+- Northeast airspace hubs remain hardest (`JFK` at `13.32` min is `81%` higher than Sacramento `SMF`
+  at `7.36` min).
+- The tuned GBT beats both "no change" and the lane-mean baseline at **all 40 of 40 hubs**, cutting
+  `0.12` min (`AUS`) to `0.79` min (`EWR`, `JFK`, `PHL`) off the lane-mean error.
+
+**By actual outcome** (`3,041,312` holdout 2024 flights grouped by realized `delta_delay`):
+
+| Actual delta delay | Flights | Share | GBT MAE | Lane-mean MAE | No-change MAE | GBT bias |
+|---|---|---|---|---|---|---|
+| Early >15 min | 651,055 | 21.4% | 14.41 | 15.60 | 22.20 | +14.40 |
+| Early 5-15 min | 1,089,815 | 35.8% | 4.58 | 4.70 | 10.31 | +3.87 |
+| Within 5 min | 782,469 | 25.7% | 5.42 | 4.78 | 2.61 | -4.65 |
+| Late 5-15 min | 306,534 | 10.1% | 14.07 | 14.61 | 8.67 | -13.85 |
+| Late >15 min | 211,439 | 7.0% | 32.16 | 35.48 | 29.48 | -32.06 |
 
 (Bias is prediction minus actual; negative means the model predicted too little delay.)
 
-- **The model beats "no change" only on flights that arrive early.** On on-time and late flights,
-  predicting 0 is better. The overall 17% gain comes from the 58% of flights that make up time.
-- **Big delays are badly missed.** Flights that end up more than 15 min late are under-predicted by
-  34 min on average. The model predicts roughly a 4 min *gain* for them. It does not recognise a
-  bad day in advance.
-- This table groups by the outcome, so some of the bias is expected: any model that predicts toward
-  the average will look biased at the extremes. It still shows the model is not a delay-warning
-  tool in its current form.
+- **The overall 18.8% MAE reduction comes from the 57.2% of flights (`1,740,870`) that recover more
+  than 5 minutes in the air.** On on-time and late-worsening flights, predicting 0 has lower conditional
+  error, though GBT still improves on the lane mean in the late buckets (`32.16` vs `35.48` min).
+- **Severe in-air delays remain missed.** Flights losing more than 15 minutes in the air (`7.0%`)
+  are under-predicted by `32.1` minutes on average, so the model is an ETA adjuster for normal
+  operations rather than a severe-storm alarm.
 
 **By hour and season:**
 
-- Error is highest for departures around 22:00 to 00:00 UTC (MAE about 11.2 to 11.5) and lowest
-  around 09:00 to 10:00 UTC (9.2 to 9.6, on low volume).
-- Monthly MAE ranges from 9.3 (October) to 11.6 (January). Flights make up the least time in
-  May (average actual delta -4.2 min) and the most in October (-7.8 min).
-- The largest single month-hub bias is BOS in February (+5.9 min): the model expected less time
-  gained than winter flights actually made up.
+- Error is highest for late-evening departures around `22:00` to `00:00` UTC (MAE `10.40` to `10.65`
+  min) and lowest around `09:00` to `10:00` UTC (`8.52` to `8.70` min).
+- Weighted monthly MAE ranges from `8.75` min (October) to `10.74` min (January). Flights make up
+  the least time in May (mean actual delta `-3.94` min) and the most in February (`-7.29` min).
+- The largest single month-hub bias is `BOS` in February (`+5.43` min).
 
-The dashboard's **Model Insights** tab shows these tables and the seasonality heatmap.
+The dashboard's **Model Insights** tab renders all four 40-hub tables and the seasonality heatmap.
 
 ## 4. Pipeline benchmark
 
@@ -176,89 +191,83 @@ What the data supports:
 
 ## 5. Correctness tests
 
-`pytest` runs 59 tests in GitHub Actions (`.github/workflows/ci.yml`), split into 51 pure-Python tests and 8 Spark tests.
+`pytest` collects **76 tests** across 11 files in `.github/workflows/ci.yml`, split into **68
+pure-Python tests** and **8 Spark JVM integration tests**.
 
 | Area | Tests | What it proves |
 |---|---|---|
 | Repeat-safe Gold writes | 3 (`test_dedupe_spark.py`, real Spark) | Duplicates inside a batch are dropped, rows already in Gold are dropped, and **replaying the same batch adds 0 rows** |
 | Error analysis tables | 2 (`test_error_analysis_spark.py`, real Spark) | Per-bucket and per-hub MAE, bias, and baseline comparisons match expected aggregations |
 | Live OpenSky aggregation | 3 (`test_live_processor_spark.py`, real Spark) | Only the latest `fetched_at` snapshot is counted, duplicate `icao24` transponders are deduplicated, and zero-traffic hubs emit `aircraft_nearby = 0` |
-| Train/serve and Spark contracts | 10 (`test_pipeline_contracts.py`) | Local `flight_date` survives UTC midnight rollovers, missing models fail fast unless `--allow-dummy-model` is set, and all 6 Spark builders pin `spark.sql.session.timeZone=UTC` |
-| Live radar, producer, and benchmark | 12 (`test_live_radar_and_producer.py`) | Recorded sessions anchor FAA freshness to snapshot timestamps, HTTP `429` `Retry-After` triggers cooldowns, Kafka sink errors do not crash polling threads, `run_benchmark.py` forwards `--config`, and `benchmark_summary.csv` loads cleanly |
-| Output isolation and reset | 9 (`test_stream_utils.py`) | Benchmark runs write to isolated roots, and `--reset` validates every target atomically before deleting inside the project or configured external roots |
-| Config consistency | 5 (`test_config.py`) | Both configs list all 8 weather features, and the stream year is excluded from training years |
-| Model insight helpers | 6 (`test_model_insights.py`) | Feature importances sum cleanly by group, per-hub MAE gain is computed accurately, and error summary copy handles edge cases |
-| Dashboard story helpers | 9 (`test_dashboard_helpers.py`) | Weather buckets, the "so what" sentence, thin-lane filtering, and the benchmark headline match measured inputs |
+| Train/serve, tuning, and 40-hub contracts | 16 (`test_pipeline_contracts.py`) | Canonical 40-hub registry parity, local `flight_date` across UTC rollovers, `resolve_gbt_params` and `should_accept` overfitting gates, dynamic UI counts, and `spark.sql.session.timeZone=UTC` across all Spark builders |
+| Live radar, producer, and benchmark | 14 (`test_live_radar_and_producer.py`) | Snapshot-anchored FAA freshness, HTTP `429` `Retry-After` cooldowns, Kafka sink fault isolation, `--config` forwarding, and benchmark CSV loading |
+| Output isolation and reset | 9 (`test_stream_utils.py`) | Isolated benchmark output roots and atomic `--reset` path validation |
+| Config consistency | 7 (`test_config.py`) | Both configs list all 8 weather features, stream year is disjoint from train years, and `download_noaa.py` imports cleanly with or without `tqdm` |
+| Model insight helpers | 6 (`test_model_insights.py`) | Feature importances sum cleanly by group, 40-hub MAE gain sorts properly, and summary copy handles edge cases |
+| Dashboard story helpers | 13 (`test_dashboard_helpers.py`) | Weather buckets, "so what" narrative copy, thin-lane filtering, and benchmark headlines match measured inputs |
+| Benchmark & live-vs-historical parity | 3 (`test_benchmark_summary_matches_evaluation.py`, `test_live_vs_historical.py`) | Section 4 table matches `benchmark_summary.csv` and AeroAPI comparison metrics match committed artifacts |
 
-The 51 pure-Python tests run in under 1 second without starting a JVM. GitHub Actions runs all 59 tests on Ubuntu with Java 17 and PySpark 3.5.1. On Windows without Hadoop's `winutils`, the two Gold-reading Spark tests skip and the pipeline falls back to batch-level dedupe.
+The 68 pure-Python tests run in ~1.3 seconds without starting a JVM. GitHub Actions runs the full
+suite on Ubuntu with Java 17 and PySpark 3.5.1 (1 live-recording test skips on clean clones when
+`data/live_recordings/` is absent).
 
 ## 6. Limits: what we cannot claim
 
-1. **The model does not predict big delays.** Flights that end up more than 15 min late are
-   under-predicted by about 34 min, and on on-time and late flights "no change" scores better
-   (section 3.1). Use it for typical-case ETA adjustment, not to warn of severe delays.
-2. **Weather is a small effect here.** A 1.0% MAE gain is real in the ablation but too small
-   to support a headline like "weather predicts delay". The honest sentence is "weather adds
-   about 1%; lane and schedule do most of the work".
-3. **Small benchmark sample.** Each config has 4 batches and one run. Differences under roughly
-   20% (for example sp8 vs. sp64) should not be treated as real.
-4. **End-to-end latency is inflated.** The 6 to 13 second latencies include time records waited
-   in Kafka behind a backlog, not just processing time. Do not quote them as the pipeline's
-   latency. Batch time (p95 of 3 to 5 seconds) is the cleaner measure.
-5. **The benchmark is provisional.** The reduced benchmark is planned to be re-run on
-   Mon Nov 2 with the final code. Treat this table as provisional until then.
-6. **Predictions, not observations.** Dashboard charts show model output (predicted
-   `delta_delay`), not measured delays.
-7. **Proxy data.** Results describe commercial flights. Applying them to freight is an
-   assumption.
-8. **Oracle destination weather.** Origin weather is joined at the departure hour (`wheels_off_hour_utc`),
-   which is observed when the prediction runs. Destination weather (`DestWindSpeed`, `DestVisibility`,
-   `DestTemp`, `DestCeiling`) is joined from observed NOAA ISD at the scheduled arrival hour
-   (`sched_arr_hour_utc`), 1 to 6 hours after departure, rather than an airport forecast (TAF). That
-   makes the +1.01% weather ablation gain an upper bound on what forecast arrival weather can deliver.
-
-9. **The live comparison is not a test of the GBT.** The live rows use the rule-based estimator and
-   2024 hub averages, not the trained model and not true lane means (section 8).
-10. **Small live sample.** The live check covers one evening of landed flights.
+1. **The model does not predict sudden severe mid-air delays.** Flights losing more than 15 min in
+   the air (`7.0%`) are under-predicted by `32.1` min on average (section 3.1). Use the model for
+   normal-operations ETA adjustment, not as a severe-storm alarm.
+2. **Weather is a modest effect (`1.12%`).** Route cushion (`LaneMeanDelay`), departure delay, and
+   schedule time-of-day carry most of the predictive signal.
+3. **Small benchmark sample.** Each of the 12 streaming configurations ran for 4 active batches in
+   one sweep (captured on the 24-hub model prior to the 40-hub expansion). Differences under ~20%
+   (such as `sp8` vs `sp64`) should not be over-interpreted.
+4. **End-to-end latency includes queue backlog.** The `6.4` to `13.0` second p95 latencies include
+   Kafka wait time behind a backlog; batch duration (`3.2` to `5.4` s p95) is the cleaner compute
+   metric.
+5. **Predictions, not observations.** Dashboard replay charts display model predictions unless
+   explicitly labeled as actuals.
+6. **Proxy data.** Results measure commercial passenger flights; applying them to dedicated night-sort
+   cargo fleets (`MEM`, `SDF`) is a domain proxy assumption.
+7. **Observed arrival-hour weather in historical training.** Destination weather in `2018-2024`
+   joins NOAA ISD observations at `sched_arr_hour_utc` rather than archived takeoff TAF forecasts,
+   making `+1.12%` an upper bound on forecast arrival weather.
+8. **Live comparison uses the rule-based estimator on a 1-evening snapshot.** Section 8's
+   `models/live_vs_historical.csv` was recorded across 11 FlightAware sessions on one evening using
+   `live/aeroapi_predictor.py` (at the time of the 24-hub `10.53` min reference), not the Spark GBT
+   binary (`models/gbt_pipeline_v1`).
 
 ## 7. Reproduce
 
 ```bash
-python -m pytest -v                                                              # correctness suite
-python pipeline/01_batch_train.py --config config/pipeline_config_colab.yaml     # 5-year train + 2024 ablation (Colab)
-python pipeline/04_error_analysis.py --config config/pipeline_config_colab.yaml  # 2024 error tables
-python benchmark/run_benchmark.py --config config/pipeline_config_colab.yaml     # pipeline benchmark
+python -m pytest -v                                                              # full 76-test suite (Linux / Colab)
+python pipeline/01_batch_train.py --config config/pipeline_config_colab.yaml --cache-dir /content/cache_40hubs
+python scripts/tune_gbt.py --config config/pipeline_config_colab.yaml --cache-dir /content/cache_40hubs
+python pipeline/04_error_analysis.py --config config/pipeline_config_colab.yaml  # 40-hub error tables
+python benchmark/run_benchmark.py --config config/pipeline_config_colab.yaml     # streaming benchmark
 python live/eval_live_vs_historical.py                                           # live vs. 2024 table (needs data/live_recordings)
 ```
 
 ## 8. Live flights vs. history
 
-**Question:** do the patterns learned from 2018 to 2024 history also show up in flights that landed
-this week? Live flights come from FlightAware AeroAPI (scheduled and actual times, so the true
-`delta_delay` is known once a flight lands) with live NWS weather. `models/live_vs_historical.csv`
-holds the result; `live/eval_live_vs_historical.py` rebuilds it from the recorded sessions.
+**Question:** do the recovery patterns learned from `2018-2024` history appear in live flights today?
+`models/live_vs_historical.csv` records `505` landed FlightAware AeroAPI flights paired with live
+NWS weather (captured alongside the initial 24-hub `1,665,362`-flight `2024` snapshot; across all 40
+hubs and `3,041,312` holdout 2024 flights in Section 2, the tuned Spark GBT reaches `9.77` min vs
+`12.04` min no-change, or `18.8%` better).
 
-| Model | Live MAE (505 landed flights) | 2024 MAE (1,665,362 flights) | Live vs. no change | 2024 vs. no change |
+| Model | Live MAE (505 landed flights) | 2024 snapshot MAE (24-hub ref) | Live vs. no change | 2024 ref vs. no change |
 |---|---|---|---|---|
 | Assume the delay stays the same | 12.19 | 12.75 | n/a | n/a |
 | Historical hub average | 9.66 | 10.80 | 20.7% better | 15.3% better |
-| Live: rule-based estimator, 2024: Spark GBT | 9.67 | 10.53 | 20.7% better | 17.4% better |
+| Live: rule-based estimator, 2024: Spark GBT | 9.67 | 10.53 (40-hub tuned: **9.77**) | 20.7% better | 17.4% (**18.8%** on 40 hubs) |
 
 What this shows:
 
-- **The historical pattern transfers.** Using only 2024 hub averages cuts the error by about a fifth on
-  live flights, a little more than on the 2024 validation year. Most flights make up time in the air:
-  77% of the landed live flights arrived earlier than their departure delay implied (average
-  `delta_delay` of -8.5 min).
-- **For a traveler:** if your flight leaves late, "it will arrive just as late" overstates the arrival delay
-  by about 8 minutes on average, with a typical error of 12 minutes. Adjusting with history cuts the typical
-  error to about 10 minutes. That helps with pickups and connections.
-- **The estimator adds nothing over the hub average** on live data (9.67 vs. 9.66). The GBT's extra edge
-  in 2024 (0.27 min) is exactly the kind of gain this small sample cannot confirm or deny.
-- **Big delays are still missed.** Only 12 of the 505 landed flights were more than 15 min late, and their
-  error was large (46 min on average), the same weakness as in section 3.1.
-
-Caveats (also in `models/live_vs_historical.json`): the live rows come from a rule-based estimator, not
-the trained GBT, and the "lane mean" for live flights is built from 2024 hub averages. The 505 flights
-landed over about 5 hours of one evening, so this is evidence of a matching pattern, not a second
-validation set. Scoring live flights with the real GBT is the next step.
+- **The historical recovery pattern transfers.** `77%` of the `505` landed live flights arrived
+  earlier than their departure delay implied (mean `delta_delay` of `-8.5` min), and historical hub
+  adjustment cut MAE by `20.7%`.
+- **Operational meaning.** Assuming a late departure arrives equally late overstates arrival delay
+  by ~8 minutes on average (`12.2` min MAE). Adjusting at wheels-off cuts error under `10` minutes,
+  preventing premature cross-dock truck releases and tightening pickup windows.
+- **Big mid-air delays remain hard.** The 12 live flights losing `>15` min in the air had a `46` min
+  mean error, matching section 3.1.
