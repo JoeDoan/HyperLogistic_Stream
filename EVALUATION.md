@@ -199,12 +199,12 @@ pure-Python tests** and **8 Spark JVM integration tests**.
 | Repeat-safe Gold writes | 3 (`test_dedupe_spark.py`, real Spark) | Duplicates inside a batch are dropped, rows already in Gold are dropped, and **replaying the same batch adds 0 rows** |
 | Error analysis tables | 2 (`test_error_analysis_spark.py`, real Spark) | Per-bucket and per-hub MAE, bias, and baseline comparisons match expected aggregations |
 | Live OpenSky aggregation | 3 (`test_live_processor_spark.py`, real Spark) | Only the latest `fetched_at` snapshot is counted, duplicate `icao24` transponders are deduplicated, and zero-traffic hubs emit `aircraft_nearby = 0` |
-| Train/serve, tuning, and 40-hub contracts | 16 (`test_pipeline_contracts.py`) | Canonical 40-hub registry parity, local `flight_date` across UTC rollovers, `resolve_gbt_params` and `should_accept` overfitting gates, dynamic UI counts, and `spark.sql.session.timeZone=UTC` across all Spark builders |
+| Train/serve, tuning, and 40-hub contracts | 17 (`test_pipeline_contracts.py`) | Canonical 40-hub registry parity, local `flight_date` across UTC rollovers, `resolve_gbt_params` and `should_accept` overfitting gates, dynamic UI counts, and `spark.sql.session.timeZone=UTC` across all Spark builders |
 | Live radar, producer, and benchmark | 14 (`test_live_radar_and_producer.py`) | Snapshot-anchored FAA freshness, HTTP `429` `Retry-After` cooldowns, Kafka sink fault isolation, `--config` forwarding, and benchmark CSV loading |
 | Output isolation and reset | 9 (`test_stream_utils.py`) | Isolated benchmark output roots and atomic `--reset` path validation |
-| Config consistency | 7 (`test_config.py`) | Both configs list all 8 weather features, stream year is disjoint from train years, and `download_noaa.py` imports cleanly with or without `tqdm` |
+| Config consistency | 10 (`test_config.py`) | Both configs list all 8 weather features, stream year is disjoint from train years, and `download_noaa.py` imports cleanly with or without `tqdm` |
 | Model insight helpers | 6 (`test_model_insights.py`) | Feature importances sum cleanly by group, 40-hub MAE gain sorts properly, and summary copy handles edge cases |
-| Dashboard story helpers | 13 (`test_dashboard_helpers.py`) | Weather buckets, "so what" narrative copy, thin-lane filtering, and benchmark headlines match measured inputs |
+| Dashboard story helpers | 9 (`test_dashboard_helpers.py`) | Weather buckets, "so what" narrative copy, thin-lane filtering, and benchmark headlines match measured inputs |
 | Benchmark & live-vs-historical parity | 3 (`test_benchmark_summary_matches_evaluation.py`, `test_live_vs_historical.py`) | Section 4 table matches `benchmark_summary.csv` and AeroAPI comparison metrics match committed artifacts |
 
 The 68 pure-Python tests run in ~1.3 seconds without starting a JVM. GitHub Actions runs the full
