@@ -72,18 +72,55 @@ def _enrich_weather(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def _parse_faa_minutes(series: pd.Series) -> pd.Series:
+    s = series.astype(object).where(series.notna(), "").astype(str).str.strip().str.lower()
+    hours = pd.to_numeric(s.str.extract(r"(\d+)\s*hour")[0], errors="coerce")
+    mins = pd.to_numeric(s.str.extract(r"(\d+)\s*min")[0], errors="coerce")
+    plain = pd.to_numeric(s.str.extract(r"^(\d+(?:\.\d+)?)$")[0], errors="coerce")
+    hm = hours.fillna(0.0) * 60.0 + mins.fillna(0.0)
+    return pd.Series(np.where(hours.notna() | mins.notna(), hm, plain), index=series.index, dtype="float64")
+
+
 def _enrich_faa(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty or "delay_severity" in df.columns:
         return df
     df = df.copy()
-    t = df["delay_type"].fillna("").str.lower()
-    sev = np.select(
-        [t.str.contains("closure"), t.str.contains("ground stop"), t.str.contains("ground delay"),
-         t.str.contains("arrival") | t.str.contains("departure") | t.str.contains("delay")],
-        [0, 3, 2, 1], default=0)
-    df["delay_severity"] = sev
-    avg = df["avg"] if "avg" in df.columns else pd.Series([""] * len(df), index=df.index)
-    df["avg_delay_min"] = pd.to_numeric(avg.astype(str).str.extract(r"(\d+)")[0], errors="coerce")
+    idx = df.index
+    avg_m = _parse_faa_minutes(df["avg"]) if "avg" in df.columns else pd.Series(np.nan, index=idx, dtype="float64")
+    min_m = _parse_faa_minutes(df["min"]) if "min" in df.columns else pd.Series(np.nan, index=idx, dtype="float64")
+    max_m = _parse_faa_minutes(df["max"]) if "max" in df.columns else pd.Series(np.nan, index=idx, dtype="float64")
+    avg_delay_min = avg_m.fillna(pd.concat([min_m, max_m], axis=1).mean(axis=1))
+
+    t = (
+        df["delay_type"].astype(object).where(df["delay_type"].notna(), "").astype(str).str.lower()
+        if "delay_type" in df.columns
+        else pd.Series("", index=idx)
+    )
+    r = (
+        df["reason"].astype(object).where(df["reason"].notna(), "").astype(str).str.lower()
+        if "reason" in df.columns
+        else pd.Series("", index=idx)
+    )
+
+    base_sev = np.select(
+        [
+            t.str.contains("closure", regex=False),
+            t.str.contains("ground stop", regex=False),
+            t.str.contains("ground delay", regex=False),
+            t.str.contains("arrival", regex=False)
+            | t.str.contains("departure", regex=False)
+            | t.str.contains("delay", regex=False),
+        ],
+        [0, 3, 2, 1],
+        default=0,
+    )
+    stop_reason = r.str.contains(":stop:", regex=False) | r.str.contains("ground stop", regex=False)
+    df["delay_severity"] = np.select(
+        [base_sev == 0, stop_reason | (avg_delay_min >= 90), avg_delay_min >= 45],
+        [0, np.maximum(base_sev, 3), np.maximum(base_sev, 2)],
+        default=base_sev,
+    ).astype(int)
+    df["avg_delay_min"] = avg_delay_min
     return df
 
 
@@ -439,7 +476,8 @@ def build_hub_state(data: dict, hub_coords: dict) -> pd.DataFrame:
         hubs = hubs.merge(dep_agg, on="airport", how="left")
         hubs["aero_vs_typical_min"] = hubs["aero_dep_delay_min"] - hubs["typical_delay_min"]
 
-    hubs["stress"] = (hubs["weather_severity"] + hubs["faa_severity"]).clip(0, 6).astype(int)
+    raw_stress = (hubs["weather_severity"] + hubs["faa_severity"]).clip(0, 6).astype(int)
+    hubs["stress"] = np.where(hubs["faa_severity"] > 0, np.maximum(raw_stress, 2), raw_stress)
     hubs["stress_label"] = hubs["stress"].map(STRESS_LABEL)
     hubs["color"] = hubs["stress"].map(STRESS_COLOR)
     return hubs.sort_values(["stress", "aircraft_nearby"], ascending=False).reset_index(drop=True)

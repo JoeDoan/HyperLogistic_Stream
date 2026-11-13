@@ -7,7 +7,7 @@ to Kafka topics for Spark Structured Streaming.
 Topics (defaults, override with flags):
     live_flights    <- OpenSky aircraft states        (every 120 s)
     airport_status  <- FAA NAS delays / ground stops  (every 60 s)
-    weather         <- NWS observations per hub       (every 5 min)
+    weather         <- NWS observations per hub       (every 120 s)
 
 Resilience:
   * If a fetch fails, FAA and weather re-publish the last good rows flagged
@@ -242,7 +242,7 @@ def main():
     ap.add_argument("--once", action="store_true", help="Poll each source once, then exit")
     ap.add_argument("--opensky-interval", type=int, default=120)
     ap.add_argument("--faa-interval", type=int, default=60)
-    ap.add_argument("--weather-interval", type=int, default=300)
+    ap.add_argument("--weather-interval", type=int, default=120)
     ap.add_argument("--aeroapi-interval", type=int, default=600)
     ap.add_argument("--hubs", nargs="*", default=HUBS, help="IATA codes for weather and AeroAPI")
     args = ap.parse_args()
