@@ -369,3 +369,230 @@ def test_fresh_recording_counts_as_live_but_old_one_stays_recorded():
     assert live_radar._recording_source_label("Sample recorded session", fresh, now) == "Sample recorded session"
     badge, _, _ = live_radar.compute_status_badge(pd.DataFrame(), {"source": live_radar.LIVE_FEED_LABEL})
     assert badge in ("LIVE", "STALE")
+
+
+def test_multi_hour_gdp_parses_minutes_and_escalates_hub_stress_under_vfr():
+    now_utc = datetime(2026, 11, 13, 23, 20, 0, tzinfo=timezone.utc)
+    ts = (now_utc - timedelta(seconds=15)).isoformat()
+    sfo_hubs = {"SFO": (37.6213, -122.3790, "San Francisco")}
+
+    faa = pd.DataFrame([{
+        "airport": "SFO",
+        "delay_type": "Ground Delay Programs",
+        "reason": "wind",
+        "avg": "2 hours and 18 minutes",
+        "max": "11 hours and 30 minutes",
+        "fetched_at": ts,
+        "stale": False,
+    }])
+    weather = pd.DataFrame([{
+        "airport": "SFO",
+        "visibility_m": 16093.0,
+        "ceiling_m": 4000.0,
+        "wind_kmh": 18.0,
+        "wind_gust_kmh": None,
+        "typical_delay_min": 8.0,
+        "fetched_at": ts,
+        "stale": False,
+    }])
+
+    out = live_radar.prepare_live_feeds(
+        weather=weather,
+        faa=faa,
+        traffic=pd.DataFrame(),
+        source="Spark Gold (live)",
+        now_utc=now_utc,
+    )
+    assert out["faa"].loc[0, "avg_delay_min"] == pytest.approx(138.0)
+    assert out["faa"].loc[0, "delay_severity"] == 3
+
+    hubs = live_radar.build_hub_state(out, sfo_hubs).set_index("airport")
+    assert hubs.loc["SFO", "weather_severity"] == 0
+    assert hubs.loc["SFO", "faa_severity"] == 3
+    assert hubs.loc["SFO", "stress"] == 3
+    assert hubs.loc["SFO", "stress_label"] == "Strained"
+    assert hubs.loc["SFO", "color"] == "#f97316"
+    assert "~138 min" in live_radar._story_line(hubs.loc["SFO"])
+
+
+def test_arrival_departure_min_max_ranges_and_stop_reason_escalate_severity():
+    now_utc = datetime(2026, 11, 13, 23, 20, 0, tzinfo=timezone.utc)
+    ts = (now_utc - timedelta(seconds=15)).isoformat()
+    hub_coords = {
+        "ORD": (41.9742, -87.9073, "Chicago O'Hare"),
+        "IAH": (29.9902, -95.3368, "Houston Bush"),
+        "DEN": (39.8561, -104.6737, "Denver"),
+    }
+
+    faa = pd.DataFrame([
+        {
+            "airport": "ORD",
+            "delay_type": "General Arrival/Departure Delay Info",
+            "reason": "EQ:FAA",
+            "min": "3 hours and 1 minute",
+            "max": "3 hours and 15 minutes",
+            "fetched_at": ts,
+            "stale": False,
+        },
+        {
+            "airport": "IAH",
+            "delay_type": "General Arrival/Departure Delay Info",
+            "reason": "TM Initiatives:STOP:EQ",
+            "min": "2 hours and 31 minutes",
+            "max": "2 hours and 45 minutes",
+            "fetched_at": ts,
+            "stale": False,
+        },
+        {
+            "airport": "DEN",
+            "delay_type": "General Arrival/Departure Delay Info",
+            "reason": "TM Initiatives:STOP:EQ",
+            "min": "15 minutes",
+            "max": "25 minutes",
+            "fetched_at": ts,
+            "stale": False,
+        },
+    ])
+    weather = pd.DataFrame([
+        {
+            "airport": code,
+            "visibility_m": 16093.0,
+            "ceiling_m": 4000.0,
+            "wind_kmh": 12.0,
+            "wind_gust_kmh": None,
+            "fetched_at": ts,
+            "stale": False,
+        }
+        for code in hub_coords
+    ])
+
+    out = live_radar.prepare_live_feeds(
+        weather=weather,
+        faa=faa,
+        traffic=pd.DataFrame(),
+        source="Spark Gold (live)",
+        now_utc=now_utc,
+    )
+    enriched = out["faa"].set_index("airport")
+    assert enriched.loc["ORD", "avg_delay_min"] == pytest.approx(188.0)
+    assert enriched.loc["ORD", "delay_severity"] == 3
+    assert enriched.loc["IAH", "avg_delay_min"] == pytest.approx(158.0)
+    assert enriched.loc["IAH", "delay_severity"] == 3
+    assert enriched.loc["DEN", "avg_delay_min"] == pytest.approx(20.0)
+    assert enriched.loc["DEN", "delay_severity"] == 3
+
+    hubs = live_radar.build_hub_state(out, hub_coords).set_index("airport")
+    for code in ("ORD", "IAH", "DEN"):
+        assert hubs.loc[code, "faa_severity"] == 3
+        assert hubs.loc[code, "stress"] == 3
+        assert hubs.loc[code, "color"] == "#f97316"
+
+
+def test_active_faa_delay_floors_hub_stress_at_watch_under_vfr():
+    now_utc = datetime(2026, 11, 13, 23, 20, 0, tzinfo=timezone.utc)
+    ts = (now_utc - timedelta(seconds=15)).isoformat()
+    hub_coords = {
+        "BOS": (42.3656, -71.0096, "Boston Logan"),
+        "SEA": (47.4502, -122.3088, "Seattle-Tacoma"),
+    }
+
+    faa = pd.DataFrame([{
+        "airport": "BOS",
+        "delay_type": "General Arrival/Departure Delay Info",
+        "reason": "STAFF:Staffing",
+        "min": "16 minutes",
+        "max": "30 minutes",
+        "fetched_at": ts,
+        "stale": False,
+    }])
+    weather = pd.DataFrame([
+        {
+            "airport": "BOS",
+            "visibility_m": 16093.0,
+            "ceiling_m": 4000.0,
+            "wind_kmh": 10.0,
+            "wind_gust_kmh": None,
+            "fetched_at": ts,
+            "stale": False,
+        },
+        {
+            "airport": "SEA",
+            "visibility_m": 16093.0,
+            "ceiling_m": 600.0,
+            "wind_kmh": 10.0,
+            "wind_gust_kmh": None,
+            "fetched_at": ts,
+            "stale": False,
+        },
+    ])
+
+    out = live_radar.prepare_live_feeds(
+        weather=weather,
+        faa=faa,
+        traffic=pd.DataFrame(),
+        source="Spark Gold (live)",
+        now_utc=now_utc,
+    )
+    assert out["faa"].loc[0, "avg_delay_min"] == pytest.approx(23.0)
+    assert out["faa"].loc[0, "delay_severity"] == 1
+
+    hubs = live_radar.build_hub_state(out, hub_coords).set_index("airport")
+    assert hubs.loc["BOS", "weather_severity"] == 0
+    assert hubs.loc["BOS", "faa_severity"] == 1
+    assert hubs.loc["BOS", "stress"] == 2
+    assert hubs.loc["BOS", "stress_label"] == "Watch"
+    assert hubs.loc["BOS", "color"] == "#fbbf24"
+
+    assert hubs.loc["SEA", "weather_severity"] == 1
+    assert hubs.loc["SEA", "faa_severity"] == 0
+    assert hubs.loc["SEA", "stress"] == 1
+    assert hubs.loc["SEA", "stress_label"] == "Calm"
+    assert hubs.loc["SEA", "color"] == "#10b981"
+
+
+def test_plain_numeric_duration_fallback_and_closures_stay_zero_severity():
+    faa = pd.DataFrame([
+        {
+            "airport": "ATL",
+            "delay_type": "General Arrival/Departure Delay Info",
+            "reason": "WX",
+            "avg": "150",
+            "min": None,
+            "max": None,
+        },
+        {
+            "airport": "PHX",
+            "delay_type": "General Arrival/Departure Delay Info",
+            "reason": "TM Initiatives:MIT:WX",
+            "avg": None,
+            "min": "50 minutes",
+            "max": None,
+        },
+        {
+            "airport": "LAX",
+            "delay_type": "Airport Closures",
+            "reason": "!LAX AD AP CLSD",
+            "avg": "120",
+            "min": None,
+            "max": None,
+        },
+    ])
+    enriched = live_radar._enrich_faa(faa).set_index("airport")
+    assert enriched.loc["ATL", "avg_delay_min"] == pytest.approx(150.0)
+    assert enriched.loc["ATL", "delay_severity"] == 3
+    assert enriched.loc["PHX", "avg_delay_min"] == pytest.approx(50.0)
+    assert enriched.loc["PHX", "delay_severity"] == 2
+    assert enriched.loc["LAX", "delay_severity"] == 0
+
+
+def test_live_producer_default_weather_interval_below_stale_threshold(capsys):
+    argv = ["live_producer.py", "--dry-run", "--once", "--no-opensky", "--no-aeroapi", "--hubs", "ATL"]
+    with (
+        patch.object(sys, "argv", argv),
+        patch.object(live_producer, "fetch_faa", return_value=([], b"<AIRPORT_STATUS_INFORMATION/>")),
+        patch.object(live_producer, "fetch_hub_weather", return_value={"airport": "ATL"}),
+    ):
+        live_producer.main()
+    captured = capsys.readouterr().out
+    assert "weather(120s)" in captured
+

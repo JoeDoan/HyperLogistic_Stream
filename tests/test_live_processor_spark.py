@@ -125,3 +125,114 @@ def test_empty_batch_emits_zero_rows(lp, spark):
     empty_df = spark.createDataFrame([], schema=lp.FLIGHT_SCHEMA)
     out = lp.transform_traffic(empty_df, _hubs_df(spark, lp, codes=("ATL", "SLC")), 100.0)
     assert out.count() == 0
+
+
+def _faa_row(
+    airport: str,
+    delay_type: str,
+    reason: str | None = None,
+    avg: str | None = None,
+    min_val: str | None = None,
+    max_val: str | None = None,
+) -> dict:
+    return {
+        "airport": airport,
+        "delay_type": delay_type,
+        "list": "Test_List",
+        "reason": reason,
+        "avg": avg,
+        "min": min_val,
+        "max": max_val,
+        "trend": "Increasing",
+        "fetched_at": "2026-11-13T23:20:00+00:00",
+        "stale": False,
+        "stale_age_s": 0,
+        "emit_epoch_ms": 1000,
+    }
+
+
+def test_transform_faa_parses_hours_ranges_and_escalates_severity(lp, spark):
+    rows = [
+        _faa_row(
+            "SFO",
+            "Ground Delay Programs",
+            reason="wind",
+            avg="2 hours and 18 minutes",
+            max_val="11 hours and 30 minutes",
+        ),
+        _faa_row(
+            "ORD",
+            "General Arrival/Departure Delay Info",
+            reason="EQ:FAA",
+            min_val="3 hours and 1 minute",
+            max_val="3 hours and 15 minutes",
+        ),
+        _faa_row(
+            "IAH",
+            "General Arrival/Departure Delay Info",
+            reason="TM Initiatives:STOP:EQ",
+            min_val="20 minutes",
+            max_val="30 minutes",
+        ),
+        _faa_row(
+            "PHX",
+            "Ground Delay Programs",
+            reason="THUNDERSTORMS",
+            avg="40 minutes",
+            max_val="3 hours and 3 minutes",
+        ),
+        _faa_row(
+            "LGA",
+            "General Arrival/Departure Delay Info",
+            reason="STAFF:Staffing",
+            min_val="16 minutes",
+            max_val="30 minutes",
+        ),
+        _faa_row(
+            "BOS",
+            "General Arrival/Departure Delay Info",
+            reason="WX",
+            min_val="45 minutes",
+            max_val="55 minutes",
+        ),
+        _faa_row(
+            "ATL",
+            "General Arrival/Departure Delay Info",
+            reason="WX",
+            avg="150",
+        ),
+        _faa_row(
+            "LAX",
+            "Airport Closures",
+            reason="!LAX AD AP CLSD",
+            avg="120",
+        ),
+    ]
+    df = spark.createDataFrame(rows, schema=lp.FAA_SCHEMA)
+    out = lp.transform_faa(df).toPandas().set_index("airport")
+
+    assert out.loc["SFO", "avg_delay_min"] == pytest.approx(138.0)
+    assert out.loc["SFO", "delay_severity"] == 3
+    assert bool(out.loc["SFO", "is_actionable"]) is True
+
+    assert out.loc["ORD", "avg_delay_min"] == pytest.approx(188.0)
+    assert out.loc["ORD", "delay_severity"] == 3
+
+    assert out.loc["IAH", "avg_delay_min"] == pytest.approx(25.0)
+    assert out.loc["IAH", "delay_severity"] == 3
+
+    assert out.loc["PHX", "avg_delay_min"] == pytest.approx(40.0)
+    assert out.loc["PHX", "delay_severity"] == 2
+
+    assert out.loc["LGA", "avg_delay_min"] == pytest.approx(23.0)
+    assert out.loc["LGA", "delay_severity"] == 1
+
+    assert out.loc["BOS", "avg_delay_min"] == pytest.approx(50.0)
+    assert out.loc["BOS", "delay_severity"] == 2
+
+    assert out.loc["ATL", "avg_delay_min"] == pytest.approx(150.0)
+    assert out.loc["ATL", "delay_severity"] == 3
+
+    assert out.loc["LAX", "delay_severity"] == 0
+    assert bool(out.loc["LAX", "is_actionable"]) is False
+
