@@ -194,19 +194,50 @@ def transform_weather(df, baseline):
     return out
 
 
+def _faa_minutes_expr(col_name: str):
+    s = F.trim(F.lower(F.coalesce(F.col(col_name), F.lit(""))))
+    h_str = F.regexp_extract(s, r"(\d+)\s*hour", 1)
+    m_str = F.regexp_extract(s, r"(\d+)\s*min", 1)
+    p_str = F.regexp_extract(s, r"^(\d+(?:\.\d+)?)$", 1)
+    hours = F.when(h_str != "", h_str.cast("double"))
+    mins = F.when(m_str != "", m_str.cast("double"))
+    plain = F.when(p_str != "", p_str.cast("double"))
+    return F.when(
+        hours.isNotNull() | mins.isNotNull(),
+        F.coalesce(hours, F.lit(0.0)) * F.lit(60.0) + F.coalesce(mins, F.lit(0.0)),
+    ).otherwise(plain)
+
+
 def transform_faa(df):
+    avg_m = _faa_minutes_expr("avg")
+    min_m = _faa_minutes_expr("min")
+    max_m = _faa_minutes_expr("max")
+    range_mid = (
+        F.when(min_m.isNotNull() & max_m.isNotNull(), (min_m + max_m) / F.lit(2.0))
+         .otherwise(F.coalesce(min_m, max_m))
+    )
+    avg_delay_min = F.coalesce(avg_m, range_mid)
+
     t = F.lower(F.coalesce(F.col("delay_type"), F.lit("")))
-    sev = (
-        F.when(t.contains("ground stop"), 3)
+    r = F.lower(F.coalesce(F.col("reason"), F.lit("")))
+    # Closures are mostly non-scheduled GA notices (noise) so they get severity 0 (kept, not scored).
+    base_sev = (
+        F.when(t.contains("closure"), 0)
+         .when(t.contains("ground stop"), 3)
          .when(t.contains("ground delay"), 2)
          .when(t.contains("arrival") | t.contains("departure") | t.contains("delay"), 1)
          .otherwise(0)
     )
-    # Closures are mostly non-scheduled GA notices (noise) so they get severity 0 (kept, not scored).
-    sev = F.when(t.contains("closure"), 0).otherwise(sev)
+    stop_reason = r.contains(":stop:") | r.contains("ground stop")
+    sev = (
+        F.when(base_sev == 0, 0)
+         .when(stop_reason | (avg_delay_min.isNotNull() & (avg_delay_min >= 90)), F.greatest(base_sev, F.lit(3)))
+         .when(avg_delay_min.isNotNull() & (avg_delay_min >= 45), F.greatest(base_sev, F.lit(2)))
+         .otherwise(base_sev)
+    )
     return (
         df.withColumn("delay_severity", sev.cast("int"))
-          .withColumn("avg_delay_min", F.regexp_extract("avg", r"(\d+)", 1).cast("double"))
+          .withColumn("avg_delay_min", avg_delay_min.cast("double"))
           .withColumn("is_actionable", F.col("delay_severity") > 0)
     )
 
